@@ -122,7 +122,7 @@ func net_runtime_pollClose(pd *pollDesc) {
 	if pd.rg != 0 && pd.rg != pdReady {
 		throw("netpollClose: blocked read on closing descriptor")
 	}
-	netpollclose(pd.fd)
+	netpollclose(uintptr(pd.fd))
 	pollcache.free(pd)
 }
 

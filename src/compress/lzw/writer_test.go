@@ -5,11 +5,9 @@
 package lzw
 
 import (
-	"fmt"
 	"internal/testenv"
 	"io"
 	"io/ioutil"
-	"math"
 	"os"
 	"runtime"
 	"testing"
@@ -124,34 +122,41 @@ func TestSmallLitWidth(t *testing.T) {
 	}
 }
 
-func BenchmarkEncoder(b *testing.B) {
-	buf, err := ioutil.ReadFile("../testdata/e.txt")
+func benchmarkEncoder(b *testing.B, n int) {
+	b.StopTimer()
+	b.SetBytes(int64(n))
+	buf0, err := ioutil.ReadFile("../testdata/e.txt")
 	if err != nil {
 		b.Fatal(err)
 	}
-	if len(buf) == 0 {
+	if len(buf0) == 0 {
 		b.Fatalf("test file has no data")
 	}
-
-	for e := 4; e <= 6; e++ {
-		n := int(math.Pow10(e))
-		buf0 := buf
-		buf1 := make([]byte, n)
-		for i := 0; i < n; i += len(buf0) {
-			if len(buf0) > n-i {
-				buf0 = buf0[:n-i]
-			}
-			copy(buf1[i:], buf0)
+	buf1 := make([]byte, n)
+	for i := 0; i < n; i += len(buf0) {
+		if len(buf0) > n-i {
+			buf0 = buf0[:n-i]
 		}
-		buf0 = nil
-		runtime.GC()
-		b.Run(fmt.Sprint("1e", e), func(b *testing.B) {
-			b.SetBytes(int64(n))
-			for i := 0; i < b.N; i++ {
-				w := NewWriter(ioutil.Discard, LSB, 8)
-				w.Write(buf1)
-				w.Close()
-			}
-		})
+		copy(buf1[i:], buf0)
 	}
+	buf0 = nil
+	runtime.GC()
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		w := NewWriter(ioutil.Discard, LSB, 8)
+		w.Write(buf1)
+		w.Close()
+	}
+}
+
+func BenchmarkEncoder1e4(b *testing.B) {
+	benchmarkEncoder(b, 1e4)
+}
+
+func BenchmarkEncoder1e5(b *testing.B) {
+	benchmarkEncoder(b, 1e5)
+}
+
+func BenchmarkEncoder1e6(b *testing.B) {
+	benchmarkEncoder(b, 1e6)
 }

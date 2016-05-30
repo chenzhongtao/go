@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors. All rights reserved.
+// Copyright 2011 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -138,7 +138,7 @@ func parseNetworkLayerAddr(b []byte, family byte) (Sockaddr, error) {
 	//
 	// - The kernel form appends leading bytes to the prefix field
 	//   to make the <length, prefix> tuple to be conformed with
-	//   the routing message boundary
+	//   the routing messeage boundary
 	l := int(rsaAlignOf(int(b[0])))
 	if len(b) < l {
 		return nil, EINVAL
@@ -176,8 +176,6 @@ func parseNetworkLayerAddr(b []byte, family byte) (Sockaddr, error) {
 // RouteRIB returns routing information base, as known as RIB,
 // which consists of network facility information, states and
 // parameters.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 func RouteRIB(facility, param int) ([]byte, error) {
 	mib := []_C_int{CTL_NET, AF_ROUTE, 0, 0, _C_int(facility), _C_int(param)}
 	// Find size.
@@ -196,8 +194,6 @@ func RouteRIB(facility, param int) ([]byte, error) {
 }
 
 // RoutingMessage represents a routing message.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 type RoutingMessage interface {
 	sockaddr() ([]Sockaddr, error)
 }
@@ -212,8 +208,6 @@ type anyMessage struct {
 
 // RouteMessage represents a routing message containing routing
 // entries.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 type RouteMessage struct {
 	Header RtMsghdr
 	Data   []byte
@@ -258,8 +252,6 @@ func (m *RouteMessage) sockaddr() ([]Sockaddr, error) {
 
 // InterfaceMessage represents a routing message containing
 // network interface entries.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 type InterfaceMessage struct {
 	Header IfMsghdr
 	Data   []byte
@@ -280,8 +272,6 @@ func (m *InterfaceMessage) sockaddr() ([]Sockaddr, error) {
 
 // InterfaceAddrMessage represents a routing message containing
 // network interface address entries.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 type InterfaceAddrMessage struct {
 	Header IfaMsghdr
 	Data   []byte
@@ -326,8 +316,6 @@ func (m *InterfaceAddrMessage) sockaddr() ([]Sockaddr, error) {
 
 // ParseRoutingMessage parses b as routing messages and returns the
 // slice containing the RoutingMessage interfaces.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 func ParseRoutingMessage(b []byte) (msgs []RoutingMessage, err error) {
 	nmsgs, nskips := 0, 0
 	for len(b) >= anyMessageLen {
@@ -353,8 +341,6 @@ func ParseRoutingMessage(b []byte) (msgs []RoutingMessage, err error) {
 
 // ParseRoutingSockaddr parses msg's payload as raw sockaddrs and
 // returns the slice containing the Sockaddr interfaces.
-//
-// Deprecated: Use golang.org/x/net/route instead.
 func ParseRoutingSockaddr(msg RoutingMessage) ([]Sockaddr, error) {
 	sas, err := msg.sockaddr()
 	if err != nil {

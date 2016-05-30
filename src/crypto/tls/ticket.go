@@ -126,7 +126,11 @@ func (s *sessionState) unmarshal(data []byte) bool {
 		data = data[certLen:]
 	}
 
-	return len(data) == 0
+	if len(data) > 0 {
+		return false
+	}
+
+	return true
 }
 
 func (c *Conn) encryptTicket(state *sessionState) ([]byte, error) {

@@ -78,6 +78,12 @@ var (
 	renamedComplex128Val renamedComplex128
 )
 
+type FloatTest struct {
+	text string
+	in   float64
+	out  float64
+}
+
 // Xs accepts any non-empty run of the verb character
 type Xs string
 
@@ -513,7 +519,7 @@ func testScanfMulti(name string, t *testing.T) {
 		if err != nil {
 			if test.err == "" {
 				t.Errorf("got error scanning (%q, %q): %q", test.format, test.text, err)
-			} else if !strings.Contains(err.Error(), test.err) {
+			} else if strings.Index(err.Error(), test.err) < 0 {
 				t.Errorf("got wrong error scanning (%q, %q): %q; expected %q", test.format, test.text, err, test.err)
 			}
 			continue
@@ -607,7 +613,7 @@ func TestScanNotPointer(t *testing.T) {
 	_, err := Fscan(r, a)
 	if err == nil {
 		t.Error("expected error scanning non-pointer")
-	} else if !strings.Contains(err.Error(), "pointer") {
+	} else if strings.Index(err.Error(), "pointer") < 0 {
 		t.Errorf("expected pointer error scanning non-pointer, got: %s", err)
 	}
 }
@@ -617,7 +623,7 @@ func TestScanlnNoNewline(t *testing.T) {
 	_, err := Sscanln("1 x\n", &a)
 	if err == nil {
 		t.Error("expected error scanning string missing newline")
-	} else if !strings.Contains(err.Error(), "newline") {
+	} else if strings.Index(err.Error(), "newline") < 0 {
 		t.Errorf("expected newline error scanning string missing newline, got: %s", err)
 	}
 }
@@ -628,7 +634,7 @@ func TestScanlnWithMiddleNewline(t *testing.T) {
 	_, err := Fscanln(r, &a, &b)
 	if err == nil {
 		t.Error("expected error scanning string with extra newline")
-	} else if !strings.Contains(err.Error(), "newline") {
+	} else if strings.Index(err.Error(), "newline") < 0 {
 		t.Errorf("expected newline error scanning string with extra newline, got: %s", err)
 	}
 }
@@ -761,7 +767,7 @@ func TestUnreadRuneWithBufio(t *testing.T) {
 
 type TwoLines string
 
-// Scan attempts to read two lines into the object. Scanln should prevent this
+// Scan attempts to read two lines into the object.  Scanln should prevent this
 // because it stops at newline; Scan and Scanf should be fine.
 func (t *TwoLines) Scan(state ScanState, verb rune) error {
 	chars := make([]rune, 0, 100)
@@ -989,18 +995,6 @@ func BenchmarkScanRecursiveInt(b *testing.B) {
 	var r RecursiveInt
 	for i := b.N - 1; i >= 0; i-- {
 		buf := bytes.NewBuffer(ints)
-		b.StartTimer()
-		Fscan(buf, &r)
-		b.StopTimer()
-	}
-}
-
-func BenchmarkScanRecursiveIntReaderWrapper(b *testing.B) {
-	b.ResetTimer()
-	ints := makeInts(intCount)
-	var r RecursiveInt
-	for i := b.N - 1; i >= 0; i-- {
-		buf := newReader(string(ints))
 		b.StartTimer()
 		Fscan(buf, &r)
 		b.StopTimer()

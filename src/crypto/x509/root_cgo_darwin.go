@@ -21,91 +21,59 @@ package x509
 // Note: The CFDataRef returned in pemRoots must be released (using CFRelease) after
 // we've consumed its content.
 int FetchPEMRoots(CFDataRef *pemRoots) {
-	// Get certificates from all domains, not just System, this lets
-	// the user add CAs to their "login" keychain, and Admins to add
-	// to the "System" keychain
-	SecTrustSettingsDomain domains[] = { kSecTrustSettingsDomainSystem,
-					     kSecTrustSettingsDomainAdmin,
-					     kSecTrustSettingsDomainUser };
-
-	int numDomains = sizeof(domains)/sizeof(SecTrustSettingsDomain);
 	if (pemRoots == NULL) {
 		return -1;
 	}
 
+	CFArrayRef certs = NULL;
+	OSStatus err = SecTrustCopyAnchorCertificates(&certs);
+	if (err != noErr) {
+		return -1;
+	}
+
 	CFMutableDataRef combinedData = CFDataCreateMutable(kCFAllocatorDefault, 0);
-	for (int i = 0; i < numDomains; i++) {
-		CFArrayRef certs = NULL;
-		// Only get certificates from domain that are trusted
-		OSStatus err = SecTrustSettingsCopyCertificates(domains[i], &certs);
+	int i, ncerts = CFArrayGetCount(certs);
+	for (i = 0; i < ncerts; i++) {
+		CFDataRef data = NULL;
+		SecCertificateRef cert = (SecCertificateRef)CFArrayGetValueAtIndex(certs, i);
+		if (cert == NULL) {
+			continue;
+		}
+
+		// Note: SecKeychainItemExport is deprecated as of 10.7 in favor of SecItemExport.
+		// Once we support weak imports via cgo we should prefer that, and fall back to this
+		// for older systems.
+		err = SecKeychainItemExport(cert, kSecFormatX509Cert, kSecItemPemArmour, NULL, &data);
 		if (err != noErr) {
 			continue;
 		}
 
-		int numCerts = CFArrayGetCount(certs);
-		for (int j = 0; j < numCerts; j++) {
-			CFDataRef data = NULL;
-			CFErrorRef errRef = NULL;
-			SecCertificateRef cert = (SecCertificateRef)CFArrayGetValueAtIndex(certs, j);
-			if (cert == NULL) {
-				continue;
-			}
-			// We only want to add Root CAs, so make sure Subject and Issuer Name match
-			CFDataRef subjectName = SecCertificateCopyNormalizedSubjectContent(cert, &errRef);
-			if (errRef != NULL) {
-				CFRelease(errRef);
-				continue;
-			}
-			CFDataRef issuerName = SecCertificateCopyNormalizedIssuerContent(cert, &errRef);
-			if (errRef != NULL) {
-				CFRelease(subjectName);
-				CFRelease(errRef);
-				continue;
-			}
-			Boolean equal = CFEqual(subjectName, issuerName);
-			CFRelease(subjectName);
-			CFRelease(issuerName);
-			if (!equal) {
-				continue;
-			}
-
-			// Note: SecKeychainItemExport is deprecated as of 10.7 in favor of SecItemExport.
-			// Once we support weak imports via cgo we should prefer that, and fall back to this
-			// for older systems.
-			err = SecKeychainItemExport(cert, kSecFormatX509Cert, kSecItemPemArmour, NULL, &data);
-			if (err != noErr) {
-				continue;
-			}
-
-			if (data != NULL) {
-				CFDataAppendBytes(combinedData, CFDataGetBytePtr(data), CFDataGetLength(data));
-				CFRelease(data);
-			}
+		if (data != NULL) {
+			CFDataAppendBytes(combinedData, CFDataGetBytePtr(data), CFDataGetLength(data));
+			CFRelease(data);
 		}
-		CFRelease(certs);
 	}
+
+	CFRelease(certs);
+
 	*pemRoots = combinedData;
 	return 0;
 }
 */
 import "C"
-import (
-	"errors"
-	"unsafe"
-)
+import "unsafe"
 
-func loadSystemRoots() (*CertPool, error) {
+func initSystemRoots() {
 	roots := NewCertPool()
 
 	var data C.CFDataRef = nil
 	err := C.FetchPEMRoots(&data)
 	if err == -1 {
-		// TODO: better error message
-		return nil, errors.New("crypto/x509: failed to load darwin system roots with cgo")
+		return
 	}
 
 	defer C.CFRelease(C.CFTypeRef(data))
 	buf := C.GoBytes(unsafe.Pointer(C.CFDataGetBytePtr(data)), C.int(C.CFDataGetLength(data)))
 	roots.AppendCertsFromPEM(buf)
-	return roots, nil
+	systemRoots = roots
 }

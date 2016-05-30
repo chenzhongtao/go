@@ -28,44 +28,25 @@ type Conn struct {
 	isClient bool
 
 	// constant after handshake; protected by handshakeMutex
-	handshakeMutex sync.Mutex // handshakeMutex < in.Mutex, out.Mutex, errMutex
-	handshakeErr   error      // error resulting from handshake
-	vers           uint16     // TLS version
-	haveVers       bool       // version has been negotiated
-	config         *Config    // configuration passed to constructor
-	// handshakeComplete is true if the connection is currently transfering
-	// application data (i.e. is not currently processing a handshake).
+	handshakeMutex    sync.Mutex // handshakeMutex < in.Mutex, out.Mutex, errMutex
+	handshakeErr      error      // error resulting from handshake
+	vers              uint16     // TLS version
+	haveVers          bool       // version has been negotiated
+	config            *Config    // configuration passed to constructor
 	handshakeComplete bool
-	// handshakes counts the number of handshakes performed on the
-	// connection so far. If renegotiation is disabled then this is either
-	// zero or one.
-	handshakes       int
-	didResume        bool // whether this connection was a session resumption
-	cipherSuite      uint16
-	ocspResponse     []byte   // stapled OCSP response
-	scts             [][]byte // signed certificate timestamps from server
-	peerCertificates []*x509.Certificate
+	didResume         bool // whether this connection was a session resumption
+	cipherSuite       uint16
+	ocspResponse      []byte   // stapled OCSP response
+	scts              [][]byte // signed certificate timestamps from server
+	peerCertificates  []*x509.Certificate
 	// verifiedChains contains the certificate chains that we built, as
 	// opposed to the ones presented by the server.
 	verifiedChains [][]*x509.Certificate
 	// serverName contains the server name indicated by the client, if any.
 	serverName string
-	// secureRenegotiation is true if the server echoed the secure
-	// renegotiation extension. (This is meaningless as a server because
-	// renegotiation is not supported in that case.)
-	secureRenegotiation bool
-
-	// clientFinishedIsFirst is true if the client sent the first Finished
-	// message during the most recent handshake. This is recorded because
-	// the first transmitted Finished message is the tls-unique
-	// channel-binding value.
-	clientFinishedIsFirst bool
-	// clientFinished and serverFinished contain the Finished message sent
-	// by the client or server in the most recent handshake. This is
-	// retained to support the renegotiation extension and tls-unique
-	// channel-binding.
-	clientFinished [12]byte
-	serverFinished [12]byte
+	// firstFinished contains the first Finished hash sent during the
+	// handshake. This is the "tls-unique" channel binding value.
+	firstFinished [12]byte
 
 	clientProtocol         string
 	clientProtocolFallback bool
@@ -75,11 +56,6 @@ type Conn struct {
 	rawInput *block       // raw input, right off the wire
 	input    *block       // application data waiting to be read
 	hand     bytes.Buffer // handshake data waiting to be read
-
-	// bytesSent counts the bytes of application data sent.
-	// packetsSent counts packets.
-	bytesSent   int64
-	packetsSent int64
 
 	// activeCall is an atomic int32; the low bit is whether Close has
 	// been called. the rest of the bits are the number of goroutines
@@ -148,6 +124,13 @@ func (hc *halfConn) setErrorLocked(err error) error {
 	return err
 }
 
+func (hc *halfConn) error() error {
+	hc.Lock()
+	err := hc.err
+	hc.Unlock()
+	return err
+}
+
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
 func (hc *halfConn) prepareCipherSpec(version uint16, cipher interface{}, mac macFunction) {
@@ -185,6 +168,13 @@ func (hc *halfConn) incSeq() {
 	// Instead, must renegotiate before it does.
 	// Not likely enough to bother.
 	panic("TLS: sequence number wraparound")
+}
+
+// resetSeq resets the sequence number to zero.
+func (hc *halfConn) resetSeq() {
+	for i := range hc.seq {
+		hc.seq[i] = 0
+	}
 }
 
 // removePadding returns an unpadded slice, in constant time, which is a prefix
@@ -545,7 +535,7 @@ func (c *Conn) newRecordHeaderError(msg string) (err RecordHeaderError) {
 func (c *Conn) readRecord(want recordType) error {
 	// Caller must be in sync with connection:
 	// handshake data if handshake not yet completed,
-	// else application data.
+	// else application data.  (We don't support renegotiation.)
 	switch want {
 	default:
 		c.sendAlert(alertInternalError)
@@ -553,12 +543,12 @@ func (c *Conn) readRecord(want recordType) error {
 	case recordTypeHandshake, recordTypeChangeCipherSpec:
 		if c.handshakeComplete {
 			c.sendAlert(alertInternalError)
-			return c.in.setErrorLocked(errors.New("tls: handshake or ChangeCipherSpec requested while not in handshake"))
+			return c.in.setErrorLocked(errors.New("tls: handshake or ChangeCipherSpec requested after handshake complete"))
 		}
 	case recordTypeApplicationData:
 		if !c.handshakeComplete {
 			c.sendAlert(alertInternalError)
-			return c.in.setErrorLocked(errors.New("tls: application data record requested while in handshake"))
+			return c.in.setErrorLocked(errors.New("tls: application data record requested before handshake complete"))
 		}
 	}
 
@@ -682,7 +672,7 @@ Again:
 
 	case recordTypeHandshake:
 		// TODO(rsc): Should at least pick off connection close.
-		if typ != want && !(c.isClient && c.config.Renegotiation != RenegotiateNever) {
+		if typ != want {
 			return c.in.setErrorLocked(c.sendAlert(alertNoRenegotiation))
 		}
 		c.hand.Write(data)
@@ -704,14 +694,12 @@ func (c *Conn) sendAlertLocked(err alert) error {
 		c.tmp[0] = alertLevelError
 	}
 	c.tmp[1] = byte(err)
-
-	_, writeErr := c.writeRecordLocked(recordTypeAlert, c.tmp[0:2])
-	if err == alertCloseNotify {
-		// closeNotify is a special case in that it isn't an error.
-		return writeErr
+	c.writeRecord(recordTypeAlert, c.tmp[0:2])
+	// closeNotify is a special case in that it isn't an error:
+	if err != alertCloseNotify {
+		return c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
 	}
-
-	return c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
+	return nil
 }
 
 // sendAlert sends a TLS alert message.
@@ -722,96 +710,16 @@ func (c *Conn) sendAlert(err alert) error {
 	return c.sendAlertLocked(err)
 }
 
-const (
-	// tcpMSSEstimate is a conservative estimate of the TCP maximum segment
-	// size (MSS). A constant is used, rather than querying the kernel for
-	// the actual MSS, to avoid complexity. The value here is the IPv6
-	// minimum MTU (1280 bytes) minus the overhead of an IPv6 header (40
-	// bytes) and a TCP header with timestamps (32 bytes).
-	tcpMSSEstimate = 1208
-
-	// recordSizeBoostThreshold is the number of bytes of application data
-	// sent after which the TLS record size will be increased to the
-	// maximum.
-	recordSizeBoostThreshold = 128 * 1024
-)
-
-// maxPayloadSizeForWrite returns the maximum TLS payload size to use for the
-// next application data record. There is the following trade-off:
-//
-//   - For latency-sensitive applications, such as web browsing, each TLS
-//     record should fit in one TCP segment.
-//   - For throughput-sensitive applications, such as large file transfers,
-//     larger TLS records better amortize framing and encryption overheads.
-//
-// A simple heuristic that works well in practice is to use small records for
-// the first 1MB of data, then use larger records for subsequent data, and
-// reset back to smaller records after the connection becomes idle. See "High
-// Performance Web Networking", Chapter 4, or:
-// https://www.igvita.com/2013/10/24/optimizing-tls-record-size-and-buffering-latency/
-//
-// In the interests of simplicity and determinism, this code does not attempt
-// to reset the record size once the connection is idle, however.
-//
+// writeRecord writes a TLS record with the given type and payload
+// to the connection and updates the record layer state.
 // c.out.Mutex <= L.
-func (c *Conn) maxPayloadSizeForWrite(typ recordType, explicitIVLen int) int {
-	if c.config.DynamicRecordSizingDisabled || typ != recordTypeApplicationData {
-		return maxPlaintext
-	}
-
-	if c.bytesSent >= recordSizeBoostThreshold {
-		return maxPlaintext
-	}
-
-	// Subtract TLS overheads to get the maximum payload size.
-	macSize := 0
-	if c.out.mac != nil {
-		macSize = c.out.mac.Size()
-	}
-
-	payloadBytes := tcpMSSEstimate - recordHeaderLen - explicitIVLen
-	if c.out.cipher != nil {
-		switch ciph := c.out.cipher.(type) {
-		case cipher.Stream:
-			payloadBytes -= macSize
-		case cipher.AEAD:
-			payloadBytes -= ciph.Overhead()
-		case cbcMode:
-			blockSize := ciph.BlockSize()
-			// The payload must fit in a multiple of blockSize, with
-			// room for at least one padding byte.
-			payloadBytes = (payloadBytes & ^(blockSize - 1)) - 1
-			// The MAC is appended before padding so affects the
-			// payload size directly.
-			payloadBytes -= macSize
-		default:
-			panic("unknown cipher type")
-		}
-	}
-
-	// Allow packet growth in arithmetic progression up to max.
-	pkt := c.packetsSent
-	c.packetsSent++
-	if pkt > 1000 {
-		return maxPlaintext // avoid overflow in multiply below
-	}
-
-	n := payloadBytes * int(pkt+1)
-	if n > maxPlaintext {
-		n = maxPlaintext
-	}
-	return n
-}
-
-// writeRecordLocked writes a TLS record with the given type and payload to the
-// connection and updates the record layer state.
-// c.out.Mutex <= L.
-func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
+func (c *Conn) writeRecord(typ recordType, data []byte) (n int, err error) {
 	b := c.out.newBlock()
-	defer c.out.freeBlock(b)
-
-	var n int
 	for len(data) > 0 {
+		m := len(data)
+		if m > maxPlaintext {
+			m = maxPlaintext
+		}
 		explicitIVLen := 0
 		explicitIVIsSeq := false
 
@@ -834,10 +742,6 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 				explicitIVIsSeq = true
 			}
 		}
-		m := len(data)
-		if maxPayload := c.maxPayloadSizeForWrite(typ, explicitIVLen); m > maxPayload {
-			m = maxPayload
-		}
 		b.resize(recordHeaderLen + explicitIVLen + m)
 		b.data[0] = byte(typ)
 		vers := c.vers
@@ -855,38 +759,34 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 			if explicitIVIsSeq {
 				copy(explicitIV, c.out.seq[:])
 			} else {
-				if _, err := io.ReadFull(c.config.rand(), explicitIV); err != nil {
-					return n, err
+				if _, err = io.ReadFull(c.config.rand(), explicitIV); err != nil {
+					break
 				}
 			}
 		}
 		copy(b.data[recordHeaderLen+explicitIVLen:], data)
 		c.out.encrypt(b, explicitIVLen)
-		if _, err := c.conn.Write(b.data); err != nil {
-			return n, err
+		_, err = c.conn.Write(b.data)
+		if err != nil {
+			break
 		}
-		c.bytesSent += int64(m)
 		n += m
 		data = data[m:]
 	}
+	c.out.freeBlock(b)
 
 	if typ == recordTypeChangeCipherSpec {
-		if err := c.out.changeCipherSpec(); err != nil {
-			return n, c.sendAlertLocked(err.(alert))
+		err = c.out.changeCipherSpec()
+		if err != nil {
+			// Cannot call sendAlert directly,
+			// because we already hold c.out.Mutex.
+			c.tmp[0] = alertLevelError
+			c.tmp[1] = byte(err.(alert))
+			c.writeRecord(recordTypeAlert, c.tmp[0:2])
+			return n, c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
 		}
 	}
-
-	return n, nil
-}
-
-// writeRecord writes a TLS record with the given type and payload to the
-// connection and updates the record layer state.
-// L < c.out.Mutex.
-func (c *Conn) writeRecord(typ recordType, data []byte) (int, error) {
-	c.out.Lock()
-	defer c.out.Unlock()
-
-	return c.writeRecordLocked(typ, data)
+	return
 }
 
 // readHandshake reads the next handshake message from
@@ -905,8 +805,7 @@ func (c *Conn) readHandshake() (interface{}, error) {
 	data := c.hand.Bytes()
 	n := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	if n > maxHandshake {
-		c.sendAlertLocked(alertInternalError)
-		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshake))
+		return nil, c.in.setErrorLocked(c.sendAlert(alertInternalError))
 	}
 	for c.hand.Len() < 4+n {
 		if err := c.in.err; err != nil {
@@ -919,8 +818,6 @@ func (c *Conn) readHandshake() (interface{}, error) {
 	data = c.hand.Next(4 + n)
 	var m handshakeMessage
 	switch data[0] {
-	case typeHelloRequest:
-		m = new(helloRequestMsg)
 	case typeClientHello:
 		m = new(clientHelloMsg)
 	case typeServerHello:
@@ -964,7 +861,7 @@ func (c *Conn) readHandshake() (interface{}, error) {
 	return m, nil
 }
 
-var errClosed = errors.New("tls: use of closed connection")
+var errClosed = errors.New("crypto/tls: use of closed connection")
 
 // Write writes data to the connection.
 func (c *Conn) Write(b []byte) (int, error) {
@@ -1007,7 +904,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	var m int
 	if len(b) > 1 && c.vers <= VersionTLS10 {
 		if _, ok := c.out.cipher.(cipher.BlockMode); ok {
-			n, err := c.writeRecordLocked(recordTypeApplicationData, b[:1])
+			n, err := c.writeRecord(recordTypeApplicationData, b[:1])
 			if err != nil {
 				return n, c.out.setErrorLocked(err)
 			}
@@ -1015,50 +912,8 @@ func (c *Conn) Write(b []byte) (int, error) {
 		}
 	}
 
-	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
+	n, err := c.writeRecord(recordTypeApplicationData, b)
 	return n + m, c.out.setErrorLocked(err)
-}
-
-// handleRenegotiation processes a HelloRequest handshake message.
-// c.in.Mutex <= L
-func (c *Conn) handleRenegotiation() error {
-	msg, err := c.readHandshake()
-	if err != nil {
-		return err
-	}
-
-	_, ok := msg.(*helloRequestMsg)
-	if !ok {
-		c.sendAlert(alertUnexpectedMessage)
-		return alertUnexpectedMessage
-	}
-
-	if !c.isClient {
-		return c.sendAlert(alertNoRenegotiation)
-	}
-
-	switch c.config.Renegotiation {
-	case RenegotiateNever:
-		return c.sendAlert(alertNoRenegotiation)
-	case RenegotiateOnceAsClient:
-		if c.handshakes > 1 {
-			return c.sendAlert(alertNoRenegotiation)
-		}
-	case RenegotiateFreelyAsClient:
-		// Ok.
-	default:
-		c.sendAlert(alertInternalError)
-		return errors.New("tls: unknown Renegotiation value")
-	}
-
-	c.handshakeMutex.Lock()
-	defer c.handshakeMutex.Unlock()
-
-	c.handshakeComplete = false
-	if c.handshakeErr = c.clientHandshake(); c.handshakeErr == nil {
-		c.handshakes++
-	}
-	return c.handshakeErr
 }
 
 // Read can be made to time out and return a net.Error with Timeout() == true
@@ -1084,13 +939,6 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 			if err := c.readRecord(recordTypeApplicationData); err != nil {
 				// Soft error, like EAGAIN
 				return 0, err
-			}
-			if c.hand.Len() > 0 {
-				// We received handshake bytes, indicating the
-				// start of a renegotiation.
-				if err := c.handleRenegotiation(); err != nil {
-					return 0, err
-				}
 			}
 		}
 		if err := c.in.err; err != nil {
@@ -1172,44 +1020,19 @@ func (c *Conn) Close() error {
 // Most uses of this package need not call Handshake
 // explicitly: the first Read or Write will call it automatically.
 func (c *Conn) Handshake() error {
-	// c.handshakeErr and c.handshakeComplete are protected by
-	// c.handshakeMutex. In order to perform a handshake, we need to lock
-	// c.in also and c.handshakeMutex must be locked after c.in.
-	//
-	// However, if a Read() operation is hanging then it'll be holding the
-	// lock on c.in and so taking it here would cause all operations that
-	// need to check whether a handshake is pending (such as Write) to
-	// block.
-	//
-	// Thus we take c.handshakeMutex first and, if we find that a handshake
-	// is needed, then we unlock, acquire c.in and c.handshakeMutex in the
-	// correct order, and check again.
 	c.handshakeMutex.Lock()
 	defer c.handshakeMutex.Unlock()
-
-	for i := 0; i < 2; i++ {
-		if i == 1 {
-			c.handshakeMutex.Unlock()
-			c.in.Lock()
-			defer c.in.Unlock()
-			c.handshakeMutex.Lock()
-		}
-
-		if err := c.handshakeErr; err != nil {
-			return err
-		}
-		if c.handshakeComplete {
-			return nil
-		}
+	if err := c.handshakeErr; err != nil {
+		return err
+	}
+	if c.handshakeComplete {
+		return nil
 	}
 
 	if c.isClient {
 		c.handshakeErr = c.clientHandshake()
 	} else {
 		c.handshakeErr = c.serverHandshake()
-	}
-	if c.handshakeErr == nil {
-		c.handshakes++
 	}
 	return c.handshakeErr
 }
@@ -1233,11 +1056,7 @@ func (c *Conn) ConnectionState() ConnectionState {
 		state.SignedCertificateTimestamps = c.scts
 		state.OCSPResponse = c.ocspResponse
 		if !c.didResume {
-			if c.clientFinishedIsFirst {
-				state.TLSUnique = c.clientFinished[:]
-			} else {
-				state.TLSUnique = c.serverFinished[:]
-			}
+			state.TLSUnique = c.firstFinished[:]
 		}
 	}
 
@@ -1254,7 +1073,7 @@ func (c *Conn) OCSPResponse() []byte {
 }
 
 // VerifyHostname checks that the peer certificate chain is valid for
-// connecting to host. If so, it returns nil; if not, it returns an error
+// connecting to host.  If so, it returns nil; if not, it returns an error
 // describing the problem.
 func (c *Conn) VerifyHostname(host string) error {
 	c.handshakeMutex.Lock()

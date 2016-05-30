@@ -1,12 +1,12 @@
 package main
 
 import (
-	"depBase"
+	"dep"
 	"runtime"
 )
 
 func main() {
-	defer depBase.ImplementedInAsm()
+	defer dep.ImplementedInAsm()
 	runtime.GC()
-	depBase.V = depBase.F() + 1
+	dep.V = dep.F() + 1
 }

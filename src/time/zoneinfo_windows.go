@@ -83,7 +83,7 @@ func extractCAPS(desc string) string {
 	var short []rune
 	for _, c := range desc {
 		if 'A' <= c && c <= 'Z' {
-			short = append(short, c)
+			short = append(short, rune(c))
 		}
 	}
 	return string(short)
@@ -139,8 +139,6 @@ func pseudoUnix(year int, d *syscall.Systemtime) int64 {
 
 func initLocalFromTZI(i *syscall.Timezoneinformation) {
 	l := &localLoc
-
-	l.name = "Local"
 
 	nzone := 1
 	if i.StandardDate.Month > 0 {

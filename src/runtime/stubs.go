@@ -85,7 +85,7 @@ func fastrand1() uint32
 
 // in asm_*.s
 //go:noescape
-func memequal(a, b unsafe.Pointer, size uintptr) bool
+func memeq(a, b unsafe.Pointer, size uintptr) bool
 
 // noescape hides a pointer from escape analysis.  noescape is
 // the identity function but escape analysis doesn't think the

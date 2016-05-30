@@ -15,7 +15,7 @@ import (
 //
 // Various implementations of ValueConverter are provided by the
 // driver package to provide consistent implementations of conversions
-// between drivers. The ValueConverters have several uses:
+// between drivers.  The ValueConverters have several uses:
 //
 //  * converting from the Value types as provided by the sql package
 //    into a database table's specific column type and making sure it
@@ -172,21 +172,28 @@ func (n NotNull) ConvertValue(v interface{}) (Value, error) {
 }
 
 // IsValue reports whether v is a valid Value parameter type.
+// Unlike IsScanValue, IsValue permits the string type.
 func IsValue(v interface{}) bool {
-	if v == nil {
+	if IsScanValue(v) {
 		return true
 	}
-	switch v.(type) {
-	case []byte, bool, float64, int64, string, time.Time:
+	if _, ok := v.(string); ok {
 		return true
 	}
 	return false
 }
 
-// IsScanValue is equivalent to IsValue.
-// It exists for compatibility.
+// IsScanValue reports whether v is a valid Value scan type.
+// Unlike IsValue, IsScanValue does not permit the string type.
 func IsScanValue(v interface{}) bool {
-	return IsValue(v)
+	if v == nil {
+		return true
+	}
+	switch v.(type) {
+	case int64, float64, []byte, bool, time.Time:
+		return true
+	}
+	return false
 }
 
 // DefaultParameterConverter is the default implementation of

@@ -11,32 +11,9 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
-	"strings"
 	"unicode"
 	"unicode/utf8"
 )
-
-type importer struct {
-	imports map[string]*types.Package
-	data    []byte
-	path    string
-	buf     []byte // for reading strings
-
-	// object lists
-	strList       []string         // in order of appearance
-	pkgList       []*types.Package // in order of appearance
-	typList       []types.Type     // in order of appearance
-	trackAllTypes bool
-
-	// position encoding
-	posInfoFormat bool
-	prevFile      string
-	prevLine      int
-
-	// debugging support
-	debugFormat bool
-	read        int // bytes read
-}
 
 // BImportData imports a package from the serialized package data
 // and returns the number of bytes consumed and a reference to the package.
@@ -46,12 +23,11 @@ func BImportData(imports map[string]*types.Package, data []byte, path string) (i
 	p := importer{
 		imports: imports,
 		data:    data,
-		path:    path,
-		strList: []string{""}, // empty string is mapped to 0
 	}
+	p.buf = p.bufarray[:]
 
 	// read low-level encoding format
-	switch format := p.rawByte(); format {
+	switch format := p.byte(); format {
 	case 'c':
 		// compact format - nothing to do
 	case 'd':
@@ -60,48 +36,75 @@ func BImportData(imports map[string]*types.Package, data []byte, path string) (i
 		return p.read, nil, fmt.Errorf("invalid encoding format in export data: got %q; want 'c' or 'd'", format)
 	}
 
-	p.trackAllTypes = p.rawByte() == 'a'
-
-	p.posInfoFormat = p.int() != 0
-
 	// --- generic export data ---
 
 	if v := p.string(); v != "v0" {
-		return p.read, nil, fmt.Errorf("unknown export data version: %s", v)
+		return p.read, nil, fmt.Errorf("unknown version: %s", v)
 	}
 
 	// populate typList with predeclared "known" types
 	p.typList = append(p.typList, predeclared...)
 
 	// read package data
-	pkg := p.pkg()
+	// TODO(gri) clean this up
+	i := p.tagOrIndex()
+	if i != packageTag {
+		panic(fmt.Sprintf("package tag expected, got %d", i))
+	}
+	name := p.string()
+	if s := p.string(); s != "" {
+		panic(fmt.Sprintf("empty path expected, got %s", s))
+	}
+	pkg := p.imports[path]
+	if pkg == nil {
+		pkg = types.NewPackage(path, name)
+		p.imports[path] = pkg
+	}
+	p.pkgList = append(p.pkgList, pkg)
 
-	// read objects of phase 1 only (see cmd/compiler/internal/gc/bexport.go)
-	objcount := 0
-	for {
-		tag := p.tagOrIndex()
-		if tag == endTag {
-			break
-		}
-		p.obj(tag)
-		objcount++
+	if debug && p.pkgList[0] != pkg {
+		panic("imported packaged not found in pkgList[0]")
 	}
 
-	// self-verification
-	if count := p.int(); count != objcount {
-		panic(fmt.Sprintf("got %d objects; want %d", objcount, count))
+	// read compiler-specific flags
+	p.string() // discard
+
+	// read consts
+	for i := p.int(); i > 0; i-- {
+		name := p.string()
+		typ := p.typ(nil)
+		val := p.value()
+		p.declare(types.NewConst(token.NoPos, pkg, name, typ, val))
+	}
+
+	// read vars
+	for i := p.int(); i > 0; i-- {
+		name := p.string()
+		typ := p.typ(nil)
+		p.declare(types.NewVar(token.NoPos, pkg, name, typ))
+	}
+
+	// read funcs
+	for i := p.int(); i > 0; i-- {
+		name := p.string()
+		sig := p.typ(nil).(*types.Signature)
+		p.int() // read and discard index of inlined function body
+		p.declare(types.NewFunc(token.NoPos, pkg, name, sig))
+	}
+
+	// read types
+	for i := p.int(); i > 0; i-- {
+		// name is parsed as part of named type and the
+		// type object is added to scope via respective
+		// named type
+		_ = p.typ(nil).(*types.Named)
 	}
 
 	// ignore compiler-specific import data
 
 	// complete interfaces
 	for _, typ := range p.typList {
-		// If we only record named types (!p.trackAllTypes),
-		// we must check the underlying types here. If we
-		// track all types, the Underlying() method call is
-		// not needed.
-		// TODO(gri) Remove if p.trackAllTypes is gone.
-		if it, ok := typ.Underlying().(*types.Interface); ok {
+		if it, ok := typ.(*types.Interface); ok {
 			it.Complete()
 		}
 	}
@@ -115,6 +118,25 @@ func BImportData(imports map[string]*types.Package, data []byte, path string) (i
 	pkg.MarkComplete()
 
 	return p.read, pkg, nil
+}
+
+type importer struct {
+	imports  map[string]*types.Package
+	data     []byte
+	buf      []byte   // for reading strings
+	bufarray [64]byte // initial underlying array for buf, large enough to avoid allocation when compiling std lib
+	pkgList  []*types.Package
+	typList  []types.Type
+
+	debugFormat bool
+	read        int // bytes read
+}
+
+func (p *importer) declare(obj types.Object) {
+	if alt := p.pkgList[0].Scope().Insert(obj); alt != nil {
+		// This can only happen if we import a package a second time.
+		panic(fmt.Sprintf("%s already declared", alt.Name()))
+	}
 }
 
 func (p *importer) pkg() *types.Package {
@@ -138,98 +160,20 @@ func (p *importer) pkg() *types.Package {
 		panic("empty package name in import")
 	}
 
-	// an empty path denotes the package we are currently importing;
-	// it must be the first package we see
-	if (path == "") != (len(p.pkgList) == 0) {
-		panic(fmt.Sprintf("package path %q for pkg index %d", path, len(p.pkgList)))
+	// we should never see an empty import path
+	if path == "" {
+		panic("empty import path")
 	}
 
 	// if the package was imported before, use that one; otherwise create a new one
-	if path == "" {
-		path = p.path
-	}
 	pkg := p.imports[path]
 	if pkg == nil {
 		pkg = types.NewPackage(path, name)
 		p.imports[path] = pkg
-	} else if pkg.Name() != name {
-		panic(fmt.Sprintf("conflicting names %s and %s for package %q", pkg.Name(), name, path))
 	}
 	p.pkgList = append(p.pkgList, pkg)
 
 	return pkg
-}
-
-func (p *importer) declare(obj types.Object) {
-	pkg := obj.Pkg()
-	if alt := pkg.Scope().Insert(obj); alt != nil {
-		// This could only trigger if we import a (non-type) object a second time.
-		// This should never happen because 1) we only import a package once; and
-		// b) we ignore compiler-specific export data which may contain functions
-		// whose inlined function bodies refer to other functions that were already
-		// imported.
-		// (See also the comment in cmd/compile/internal/gc/bimport.go importer.obj,
-		// switch case importing functions).
-		panic(fmt.Sprintf("inconsistent import:\n\t%v\npreviously imported as:\n\t%v\n", alt, obj))
-	}
-}
-
-func (p *importer) obj(tag int) {
-	switch tag {
-	case constTag:
-		p.pos()
-		pkg, name := p.qualifiedName()
-		typ := p.typ(nil)
-		val := p.value()
-		p.declare(types.NewConst(token.NoPos, pkg, name, typ, val))
-
-	case typeTag:
-		_ = p.typ(nil)
-
-	case varTag:
-		p.pos()
-		pkg, name := p.qualifiedName()
-		typ := p.typ(nil)
-		p.declare(types.NewVar(token.NoPos, pkg, name, typ))
-
-	case funcTag:
-		p.pos()
-		pkg, name := p.qualifiedName()
-		params, isddd := p.paramList()
-		result, _ := p.paramList()
-		sig := types.NewSignature(nil, params, result, isddd)
-		p.declare(types.NewFunc(token.NoPos, pkg, name, sig))
-
-	default:
-		panic(fmt.Sprintf("unexpected object tag %d", tag))
-	}
-}
-
-func (p *importer) pos() {
-	if !p.posInfoFormat {
-		return
-	}
-
-	file := p.prevFile
-	line := p.prevLine
-	if delta := p.int(); delta != 0 {
-		// line changed
-		line += delta
-	} else if n := p.int(); n >= 0 {
-		// file changed
-		file = p.prevFile[:n] + p.string()
-		p.prevFile = file
-		line = p.int()
-	}
-	p.prevLine = line
-
-	// TODO(gri) register new position
-}
-
-func (p *importer) qualifiedName() (pkg *types.Package, name string) {
-	name = p.string()
-	pkg = p.pkg()
-	return
 }
 
 func (p *importer) record(t types.Type) {
@@ -261,8 +205,8 @@ func (p *importer) typ(parent *types.Package) types.Type {
 	switch i {
 	case namedTag:
 		// read type object
-		p.pos()
-		parent, name := p.qualifiedName()
+		name := p.string()
+		parent = p.pkg()
 		scope := parent.Scope()
 		obj := scope.Lookup(name)
 
@@ -287,23 +231,17 @@ func (p *importer) typ(parent *types.Package) types.Type {
 		t0.SetUnderlying(p.typ(parent))
 
 		// interfaces don't have associated methods
-		if types.IsInterface(t0) {
+		if _, ok := t0.Underlying().(*types.Interface); ok {
 			return t
 		}
 
 		// read associated methods
 		for i := p.int(); i > 0; i-- {
-			// TODO(gri) replace this with something closer to fieldName
-			p.pos()
 			name := p.string()
-			if !exported(name) {
-				p.pkg()
-			}
-
 			recv, _ := p.paramList() // TODO(gri) do we need a full param list for the receiver?
 			params, isddd := p.paramList()
 			result, _ := p.paramList()
-
+			p.int() // read and discard index of inlined function body
 			sig := types.NewSignature(recv.At(0), params, result, isddd)
 			t0.AddMethod(types.NewFunc(token.NoPos, parent, name, sig))
 		}
@@ -312,9 +250,7 @@ func (p *importer) typ(parent *types.Package) types.Type {
 
 	case arrayTag:
 		t := new(types.Array)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		n := p.int64()
 		*t = *types.NewArray(p.typ(parent), n)
@@ -322,45 +258,42 @@ func (p *importer) typ(parent *types.Package) types.Type {
 
 	case sliceTag:
 		t := new(types.Slice)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		*t = *types.NewSlice(p.typ(parent))
 		return t
 
 	case dddTag:
 		t := new(dddSlice)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		t.elem = p.typ(parent)
 		return t
 
 	case structTag:
 		t := new(types.Struct)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
-		*t = *types.NewStruct(p.fieldList(parent))
+		n := p.int()
+		fields := make([]*types.Var, n)
+		tags := make([]string, n)
+		for i := range fields {
+			fields[i] = p.field(parent)
+			tags[i] = p.string()
+		}
+		*t = *types.NewStruct(fields, tags)
 		return t
 
 	case pointerTag:
 		t := new(types.Pointer)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		*t = *types.NewPointer(p.typ(parent))
 		return t
 
 	case signatureTag:
 		t := new(types.Signature)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		params, isddd := p.paramList()
 		result, _ := p.paramList()
@@ -373,26 +306,30 @@ func (p *importer) typ(parent *types.Package) types.Type {
 		// such cycle must contain a named type which would have been
 		// first defined earlier.
 		n := len(p.typList)
-		if p.trackAllTypes {
-			p.record(nil)
-		}
+		p.record(nil)
 
 		// no embedded interfaces with gc compiler
 		if p.int() != 0 {
 			panic("unexpected embedded interface")
 		}
 
-		t := types.NewInterface(p.methodList(parent), nil)
-		if p.trackAllTypes {
-			p.typList[n] = t
+		// read methods
+		methods := make([]*types.Func, p.int())
+		for i := range methods {
+			pkg, name := p.fieldName(parent)
+			params, isddd := p.paramList()
+			result, _ := p.paramList()
+			sig := types.NewSignature(nil, params, result, isddd)
+			methods[i] = types.NewFunc(token.NoPos, pkg, name, sig)
 		}
+
+		t := types.NewInterface(methods, nil)
+		p.typList[n] = t
 		return t
 
 	case mapTag:
 		t := new(types.Map)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		key := p.typ(parent)
 		val := p.typ(parent)
@@ -401,9 +338,7 @@ func (p *importer) typ(parent *types.Package) types.Type {
 
 	case chanTag:
 		t := new(types.Chan)
-		if p.trackAllTypes {
-			p.record(t)
-		}
+		p.record(t)
 
 		var dir types.ChanDir
 		// tag values must match the constants in cmd/compile/internal/gc/go.go
@@ -426,20 +361,7 @@ func (p *importer) typ(parent *types.Package) types.Type {
 	}
 }
 
-func (p *importer) fieldList(parent *types.Package) (fields []*types.Var, tags []string) {
-	if n := p.int(); n > 0 {
-		fields = make([]*types.Var, n)
-		tags = make([]string, n)
-		for i := range fields {
-			fields[i] = p.field(parent)
-			tags[i] = p.string()
-		}
-	}
-	return
-}
-
 func (p *importer) field(parent *types.Package) *types.Var {
-	p.pos()
 	pkg, name := p.fieldName(parent)
 	typ := p.typ(parent)
 
@@ -459,25 +381,6 @@ func (p *importer) field(parent *types.Package) *types.Var {
 	}
 
 	return types.NewField(token.NoPos, pkg, name, typ, anonymous)
-}
-
-func (p *importer) methodList(parent *types.Package) (methods []*types.Func) {
-	if n := p.int(); n > 0 {
-		methods = make([]*types.Func, n)
-		for i := range methods {
-			methods[i] = p.method(parent)
-		}
-	}
-	return
-}
-
-func (p *importer) method(parent *types.Package) *types.Func {
-	p.pos()
-	pkg, name := p.fieldName(parent)
-	params, isddd := p.paramList()
-	result, _ := p.paramList()
-	sig := types.NewSignature(nil, params, result, isddd)
-	return types.NewFunc(token.NoPos, pkg, name, sig)
 }
 
 func (p *importer) fieldName(parent *types.Package) (*types.Package, string) {
@@ -527,25 +430,18 @@ func (p *importer) param(named bool) (*types.Var, bool) {
 		t = types.NewSlice(td.elem)
 	}
 
-	var pkg *types.Package
 	var name string
 	if named {
 		name = p.string()
 		if name == "" {
 			panic("expected named parameter")
 		}
-		if name != "_" {
-			pkg = p.pkg()
-		}
-		if i := strings.Index(name, "·"); i > 0 {
-			name = name[:i] // cut off gc-specific parameter numbering
-		}
 	}
 
 	// read and discard compiler-specific info
 	p.string()
 
-	return types.NewVar(token.NoPos, pkg, name, t), isddd
+	return types.NewVar(token.NoPos, nil, name, t), isddd
 }
 
 func exported(name string) bool {
@@ -650,28 +546,24 @@ func (p *importer) string() string {
 	if p.debugFormat {
 		p.marker('s')
 	}
-	// if the string was seen before, i is its index (>= 0)
-	// (the empty string is at index 0)
-	i := p.rawInt64()
-	if i >= 0 {
-		return p.strList[i]
+
+	if n := int(p.rawInt64()); n > 0 {
+		if cap(p.buf) < n {
+			p.buf = make([]byte, n)
+		} else {
+			p.buf = p.buf[:n]
+		}
+		for i := 0; i < n; i++ {
+			p.buf[i] = p.byte()
+		}
+		return string(p.buf)
 	}
-	// otherwise, i is the negative string length (< 0)
-	if n := int(-i); n <= cap(p.buf) {
-		p.buf = p.buf[:n]
-	} else {
-		p.buf = make([]byte, n)
-	}
-	for i := range p.buf {
-		p.buf[i] = p.rawByte()
-	}
-	s := string(p.buf)
-	p.strList = append(p.strList, s)
-	return s
+
+	return ""
 }
 
 func (p *importer) marker(want byte) {
-	if got := p.rawByte(); got != want {
+	if got := p.byte(); got != want {
 		panic(fmt.Sprintf("incorrect marker: got %c; want %c (pos = %d)", got, want, p.read))
 	}
 
@@ -692,13 +584,12 @@ func (p *importer) rawInt64() int64 {
 
 // needed for binary.ReadVarint in rawInt64
 func (p *importer) ReadByte() (byte, error) {
-	return p.rawByte(), nil
+	return p.byte(), nil
 }
 
 // byte is the bottleneck interface for reading p.data.
 // It unescapes '|' 'S' to '$' and '|' '|' to '|'.
-// rawByte should only be used by low-level decoders.
-func (p *importer) rawByte() byte {
+func (p *importer) byte() byte {
 	b := p.data[0]
 	r := 1
 	if b == '|' {
@@ -724,13 +615,8 @@ func (p *importer) rawByte() byte {
 
 // Tags. Must be < 0.
 const (
-	// Objects
+	// Packages
 	packageTag = -(iota + 1)
-	constTag
-	typeTag
-	varTag
-	funcTag
-	endTag
 
 	// Types
 	namedTag
@@ -752,7 +638,6 @@ const (
 	fractionTag // not used by gc
 	complexTag
 	stringTag
-	unknownTag // not used by gc (only appears in packages with errors)
 )
 
 var predeclared = []types.Type{
@@ -793,15 +678,4 @@ var predeclared = []types.Type{
 
 	// package unsafe
 	types.Typ[types.UnsafePointer],
-
-	// invalid type
-	types.Typ[types.Invalid], // only appears in packages with errors
-
-	// used internally by gc; never used by this package or in .a files
-	anyType{},
 }
-
-type anyType struct{}
-
-func (t anyType) Underlying() types.Type { return t }
-func (t anyType) String() string         { return "any" }

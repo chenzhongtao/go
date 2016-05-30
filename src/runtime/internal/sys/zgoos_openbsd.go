@@ -2,7 +2,7 @@
 
 package sys
 
-const GOOS = `openbsd`
+const TheGoos = `openbsd`
 
 const GoosAndroid = 0
 const GoosDarwin = 0

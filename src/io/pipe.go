@@ -15,6 +15,11 @@ import (
 // ErrClosedPipe is the error used for read or write operations on a closed pipe.
 var ErrClosedPipe = errors.New("io: read/write on closed pipe")
 
+type pipeResult struct {
+	n   int
+	err error
+}
+
 // A pipe is the shared pipe structure underlying PipeReader and PipeWriter.
 type pipe struct {
 	rl    sync.Mutex // gates readers one at a time

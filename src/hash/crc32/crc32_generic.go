@@ -2,24 +2,20 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build !amd64,!amd64p32,!s390x
+// +build 386 arm arm64 mips64 mips64le ppc64 ppc64le
 
 package crc32
 
-// This file contains the generic version of updateCastagnoli which does
-// slicing-by-8, or uses the fallback for very small sizes.
+// The file contains the generic version of updateCastagnoli which just calls
+// the software implementation.
 
 func updateCastagnoli(crc uint32, p []byte) uint32 {
-	// Use slicing-by-8 on larger inputs.
-	if len(p) >= sliceBy8Cutoff {
-		return updateSlicingBy8(crc, castagnoliTable8, p)
-	}
 	return update(crc, castagnoliTable, p)
 }
 
 func updateIEEE(crc uint32, p []byte) uint32 {
-	// Use slicing-by-8 on larger inputs.
-	if len(p) >= sliceBy8Cutoff {
+	// only use slicing-by-8 when input is >= 4KB
+	if len(p) >= 4096 {
 		ieeeTable8Once.Do(func() {
 			ieeeTable8 = makeTable8(IEEE)
 		})

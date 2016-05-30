@@ -31,5 +31,3 @@ func nosplit(x int)
 func rodata(x int)
 func noptr(x int)
 func wrapper(x int)
-
-func f15271() (x uint32)

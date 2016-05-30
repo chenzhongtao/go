@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -155,13 +155,7 @@ func SetPanicOnFault(enabled bool) bool {
 
 // WriteHeapDump writes a description of the heap and the objects in
 // it to the given file descriptor.
-//
-// WriteHeapDump suspends the execution of all goroutines until the heap
-// dump is completely written.  Thus, the file descriptor must not be
-// connected to a pipe or socket whose other end is in the same Go
-// process; instead, use a temporary file or network socket.
-//
-// The heap dump format is defined at https://golang.org/s/go15heapdump.
+// The heap dump format is defined at https://golang.org/s/go13heapdump.
 func WriteHeapDump(fd uintptr)
 
 // SetTraceback sets the amount of detail printed by the runtime in

@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	// test(" ") // old deprecated & removed syntax
+	test(" ") // old deprecated syntax
 	test("=") // new syntax
 }
 
@@ -60,11 +60,11 @@ func test(sep string) {
 	}
 	outstr := string(outx)
 	if !strings.Contains(outstr, "main.b") {
-		fmt.Printf("-X linker flag did not diagnose overwrite of main.b:\n%s\n", outstr)
+		fmt.Printf("-X linker flag did not diagnose overwrite of main.b\n")
 		os.Exit(1)
 	}
 	if !strings.Contains(outstr, "main.x") {
-		fmt.Printf("-X linker flag did not diagnose overwrite of main.x:\n%s\n", outstr)
+		fmt.Printf("-X linker flag did not diagnose overwrite of main.x\n")
 		os.Exit(1)
 	}
 }

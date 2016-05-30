@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors. All rights reserved.
+// Copyright 2011 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -69,8 +69,6 @@ When compiling multiple packages or a single non-main package,
 build compiles the packages but discards the resulting object,
 serving only as a check that the packages can be built.
 
-When compiling packages, build ignores files that end in '_test.go'.
-
 The -o flag, only allowed when compiling a single package,
 forces build to write the resulting executable or object
 to the named output file, instead of the default behavior described
@@ -88,7 +86,8 @@ and test commands:
 	-p n
 		the number of programs, such as build commands or
 		test binaries, that can be run in parallel.
-		The default is the number of CPUs available.
+		The default is the number of CPUs available, except
+		on darwin/arm which defaults to 1.
 	-race
 		enable data race detection.
 		Supported only on linux/amd64, freebsd/amd64, darwin/amd64 and windows/amd64.
@@ -568,10 +567,7 @@ syntax of package template.  The default output is equivalent to -f
         Goroot        bool   // is this package in the Go root?
         Standard      bool   // is this package part of the standard Go library?
         Stale         bool   // would 'go install' do anything for this package?
-        StaleReason   string // explanation for Stale==true
         Root          string // Go root or Go path dir containing this package
-        ConflictDir   string // this directory shadows Dir in $GOPATH
-        BinaryOnly    bool   // binary-only package: cannot be recompiled from sources
 
         // Source files
         GoFiles        []string // .go source files (excluding CgoFiles, TestGoFiles, XTestGoFiles)
@@ -581,7 +577,6 @@ syntax of package template.  The default output is equivalent to -f
         CXXFiles       []string // .cc, .cxx and .cpp source files
         MFiles         []string // .m source files
         HFiles         []string // .h, .hh, .hpp and .hxx source files
-        FFiles         []string // .f, .F, .for and .f90 Fortran source files
         SFiles         []string // .s source files
         SwigFiles      []string // .swig files
         SwigCXXFiles   []string // .swigcxx files
@@ -591,7 +586,6 @@ syntax of package template.  The default output is equivalent to -f
         CgoCFLAGS    []string // cgo: flags for C compiler
         CgoCPPFLAGS  []string // cgo: flags for C preprocessor
         CgoCXXFLAGS  []string // cgo: flags for C++ compiler
-        CgoFFLAGS    []string // cgo: flags for Fortran compiler
         CgoLDFLAGS   []string // cgo: flags for linker
         CgoPkgConfig []string // cgo: pkg-config names
 
@@ -705,9 +699,6 @@ Each listed package causes the execution of a separate test binary.
 
 Test files that declare a package with the suffix "_test" will be compiled as a
 separate package, and then linked and run with the main test binary.
-
-The go tool will ignore a directory named "testdata", making it available
-to hold ancillary data needed by the tests.
 
 By default, go test needs no arguments.  It compiles and tests the package
 with source in the current directory, including tests, and runs the tests.
@@ -887,15 +878,7 @@ the extension of the file name. These extensions are:
 Files of each of these types except .syso may contain build
 constraints, but the go command stops scanning for build constraints
 at the first item in the file that is not a blank line or //-style
-line comment. See the go/build package documentation for
-more details.
-
-Non-test Go source files can also include a //go:binary-only-package
-comment, indicating that the package sources are included
-for documentation only and must not be used to build the
-package binary. This enables distribution of Go packages in
-their compiled form alone. See the go/build package documentation
-for more details.
+line comment.
 
 
 GOPATH environment variable
@@ -1039,6 +1022,12 @@ Vendor directories do not affect the placement of new repositories
 being checked out for the first time by 'go get': those are always
 placed in the main GOPATH, never in a vendor subtree.
 
+In Go 1.5, as an experiment, setting the environment variable
+GO15VENDOREXPERIMENT=1 enabled these features.
+As of Go 1.6 they are on by default. To turn them off, set
+GO15VENDOREXPERIMENT=0. In Go 1.7, the environment
+variable will stop having any effect.
+
 See https://golang.org/s/go15vendor for details.
 
 
@@ -1105,6 +1094,8 @@ Special-purpose environment variables:
 		installed in a location other than where it is built.
 		File names in stack traces are rewritten from GOROOT to
 		GOROOT_FINAL.
+	GO15VENDOREXPERIMENT
+		Set to 0 to disable vendoring semantics.
 	GO_EXTLINK_ENABLED
 		Whether the linker should use external linking mode
 		when using -linkmode=auto with code that uses cgo.
@@ -1159,6 +1150,14 @@ A few common code hosting sites have special syntax:
 
 		import "github.com/user/project"
 		import "github.com/user/project/sub/directory"
+
+	Google Code Project Hosting (Git, Mercurial, Subversion)
+
+		import "code.google.com/p/project"
+		import "code.google.com/p/project/sub/directory"
+
+		import "code.google.com/p/project.subrepository"
+		import "code.google.com/p/project.subrepository/sub/directory"
 
 	Launchpad (Bazaar)
 
@@ -1362,10 +1361,7 @@ The following flags are recognized by the 'go test' command and
 control the execution of any test:
 
 	-bench regexp
-	    Run (sub)benchmarks matching a regular expression.
-	    The given regular expression is split into smaller ones by
-	    top-level '/', where each must match the corresponding part of a
-	    benchmark's identifier.
+	    Run benchmarks matching the regular expression.
 	    By default, no benchmarks run. To run all benchmarks,
 	    use '-bench .' or '-bench=.'.
 
@@ -1453,10 +1449,8 @@ control the execution of any test:
 	    (see 'go help build').
 
 	-run regexp
-	    Run only those tests and examples matching the regular expression.
-	    For tests the regular expression is split into smaller ones by
-	    top-level '/', where each must match the corresponding part of a
-	    test's identifier.
+	    Run only those tests and examples matching the regular
+	    expression.
 
 	-short
 	    Tell long-running tests to shorten their run time.
@@ -1470,6 +1464,7 @@ control the execution of any test:
 
 	-trace trace.out
 	    Write an execution trace to the specified file before exiting.
+	    Writes test binary as -c would.
 
 	-v
 	    Verbose output: log all tests as they are run. Also print all
@@ -1550,11 +1545,10 @@ A benchmark function is one named BenchmarkXXX and should have the signature,
 
 An example function is similar to a test function but, instead of using
 *testing.T to report success or failure, prints output to os.Stdout.
-If the last comment in the function starts with "Output:" then the output
-is compared exactly against the comment (see examples below). If the last
-comment begins with "Unordered output:" then the output is compared to the
-comment, however the order of the lines is ignored. An example with no such
-comment, or with no text after "Output:" is compiled but not executed.
+That output is compared against the function's "Output:" comment, which
+must be the last comment in the function body (see example below). An
+example with no such comment, or with no text after "Output:" is compiled
+but not executed.
 
 Godoc displays the body of ExampleXXX to demonstrate the use
 of the function, constant, or variable XXX.  An example of a method M with
@@ -1568,20 +1562,6 @@ Here is an example of an example:
 		Println("The output of\nthis example.")
 		// Output: The output of
 		// this example.
-	}
-
-Here is another example where the ordering of the output is ignored:
-
-	func ExamplePerm() {
-		for _, value := range Perm(4) {
-			fmt.Println(value)
-		}
-
-		// Unordered output: 4
-		// 2
-		// 1
-		// 3
-		// 0
 	}
 
 The entire test file is presented as the example when it contains a single

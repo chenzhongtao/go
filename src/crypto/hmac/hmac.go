@@ -37,16 +37,26 @@ import (
 type hmac struct {
 	size         int
 	blocksize    int
-	opad, ipad   []byte
+	key, tmp     []byte
 	outer, inner hash.Hash
+}
+
+func (h *hmac) tmpPad(xor byte) {
+	for i, k := range h.key {
+		h.tmp[i] = xor ^ k
+	}
+	for i := len(h.key); i < h.blocksize; i++ {
+		h.tmp[i] = xor
+	}
 }
 
 func (h *hmac) Sum(in []byte) []byte {
 	origLen := len(in)
 	in = h.inner.Sum(in)
+	h.tmpPad(0x5c)
+	copy(h.tmp[h.blocksize:], in[origLen:])
 	h.outer.Reset()
-	h.outer.Write(h.opad)
-	h.outer.Write(in[origLen:])
+	h.outer.Write(h.tmp)
 	return h.outer.Sum(in[:origLen])
 }
 
@@ -60,7 +70,8 @@ func (h *hmac) BlockSize() int { return h.blocksize }
 
 func (h *hmac) Reset() {
 	h.inner.Reset()
-	h.inner.Write(h.ipad)
+	h.tmpPad(0x36)
+	h.inner.Write(h.tmp[:h.blocksize])
 }
 
 // New returns a new HMAC hash using the given hash.Hash type and key.
@@ -70,22 +81,15 @@ func New(h func() hash.Hash, key []byte) hash.Hash {
 	hm.inner = h()
 	hm.size = hm.inner.Size()
 	hm.blocksize = hm.inner.BlockSize()
-	hm.ipad = make([]byte, hm.blocksize)
-	hm.opad = make([]byte, hm.blocksize)
+	hm.tmp = make([]byte, hm.blocksize+hm.size)
 	if len(key) > hm.blocksize {
 		// If key is too big, hash it.
 		hm.outer.Write(key)
 		key = hm.outer.Sum(nil)
 	}
-	copy(hm.ipad, key)
-	copy(hm.opad, key)
-	for i := range hm.ipad {
-		hm.ipad[i] ^= 0x36
-	}
-	for i := range hm.opad {
-		hm.opad[i] ^= 0x5c
-	}
-	hm.inner.Write(hm.ipad)
+	hm.key = make([]byte, len(key))
+	copy(hm.key, key)
+	hm.Reset()
 	return hm
 }
 

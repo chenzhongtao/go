@@ -62,11 +62,13 @@ func (check *Checker) call(x *operand, e *ast.CallExpr) exprKind {
 		}
 
 		arg, n, _ := unpack(func(x *operand, i int) { check.multiExpr(x, e.Args[i]) }, len(e.Args), false)
-		if arg != nil {
-			check.arguments(x, e, sig, arg, n)
-		} else {
+		if arg == nil {
 			x.mode = invalid
+			x.expr = e
+			return statement
 		}
+
+		check.arguments(x, e, sig, arg, n)
 
 		// determine result
 		switch sig.results.Len() {
@@ -79,7 +81,6 @@ func (check *Checker) call(x *operand, e *ast.CallExpr) exprKind {
 			x.mode = value
 			x.typ = sig.results
 		}
-
 		x.expr = e
 		check.hasCallOrRecv = true
 

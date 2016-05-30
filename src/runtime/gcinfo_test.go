@@ -59,14 +59,14 @@ func TestGCInfo(t *testing.T) {
 
 func verifyGCInfo(t *testing.T, name string, p interface{}, mask0 []byte) {
 	mask := runtime.GCMask(p)
-	if !bytes.Equal(mask, mask0) {
+	if bytes.Compare(mask, mask0) != 0 {
 		t.Errorf("bad GC program for %v:\nwant %+v\ngot  %+v", name, mask0, mask)
 		return
 	}
 }
 
 func padDead(mask []byte) []byte {
-	// Because the dead bit isn't encoded in the second word,
+	// Because the dead bit isn't encoded until the third word,
 	// and because on 32-bit systems a one-word allocation
 	// uses a two-word block, the pointer info for a one-word
 	// object needs to be expanded to include an extra scalar
@@ -80,9 +80,6 @@ func padDead(mask []byte) []byte {
 func trimDead(mask []byte) []byte {
 	for len(mask) > 2 && mask[len(mask)-1] == typeScalar {
 		mask = mask[:len(mask)-1]
-	}
-	if len(mask) == 2 && mask[0] == typeScalar && mask[1] == typeScalar {
-		mask = mask[:0]
 	}
 	return mask
 }
@@ -147,7 +144,7 @@ func infoBigStruct() []byte {
 			typeScalar, typeScalar, typeScalar, typeScalar, // t int; y uint16; u uint64
 			typePointer, typeScalar, // i string
 		}
-	case "arm64", "amd64", "mips64", "mips64le", "ppc64", "ppc64le", "s390x":
+	case "arm64", "amd64", "mips64", "mips64le", "ppc64", "ppc64le":
 		return []byte{
 			typePointer,                        // q *int
 			typeScalar, typeScalar, typeScalar, // w byte; e [17]byte

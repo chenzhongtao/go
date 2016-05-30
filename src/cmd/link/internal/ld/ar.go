@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors. All rights reserved.
+//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,11 +31,9 @@
 package ld
 
 import (
-	"cmd/internal/bio"
 	"cmd/internal/obj"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 )
 
@@ -59,31 +57,31 @@ type ArHdr struct {
 }
 
 // hostArchive reads an archive file holding host objects and links in
-// required objects. The general format is the same as a Go archive
+// required objects.  The general format is the same as a Go archive
 // file, but it has an armap listing symbols and the objects that
-// define them. This is used for the compiler support library
+// define them.  This is used for the compiler support library
 // libgcc.a.
 func hostArchive(name string) {
-	f, err := bio.Open(name)
+	f, err := obj.Bopenr(name)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// It's OK if we don't have a libgcc file at all.
 			if Debug['v'] != 0 {
-				fmt.Fprintf(Bso, "skipping libgcc file: %v\n", err)
+				fmt.Fprintf(&Bso, "skipping libgcc file: %v\n", err)
 			}
 			return
 		}
 		Exitf("cannot open file %s: %v", name, err)
 	}
-	defer f.Close()
+	defer obj.Bterm(f)
 
-	var magbuf [len(ARMAG)]byte
-	if _, err := io.ReadFull(f, magbuf[:]); err != nil {
+	magbuf := make([]byte, len(ARMAG))
+	if obj.Bread(f, magbuf) != len(magbuf) {
 		Exitf("file %s too short", name)
 	}
 
 	var arhdr ArHdr
-	l := nextar(f, f.Offset(), &arhdr)
+	l := nextar(f, obj.Boffset(f), &arhdr)
 	if l <= 0 {
 		Exitf("%s missing armap", name)
 	}
@@ -99,7 +97,7 @@ func hostArchive(name string) {
 	any := true
 	for any {
 		var load []uint64
-		for _, s := range Ctxt.Allsym {
+		for s := Ctxt.Allsym; s != nil; s = s.Allsym {
 			for _, r := range s.R {
 				if r.Sym != nil && r.Sym.Type&obj.SMASK == obj.SXREF {
 					if off := armap[r.Sym.Name]; off != 0 && !loaded[off] {
@@ -119,7 +117,7 @@ func hostArchive(name string) {
 			l = atolwhex(arhdr.size)
 
 			h := ldobj(f, "libgcc", l, pname, name, ArchiveObj)
-			f.Seek(h.off, 0)
+			obj.Bseek(f, h.off, 0)
 			h.ld(f, h.pkg, h.length, h.pn)
 		}
 
@@ -132,15 +130,16 @@ func hostArchive(name string) {
 type archiveMap map[string]uint64
 
 // readArmap reads the archive symbol map.
-func readArmap(filename string, f *bio.Reader, arhdr ArHdr) archiveMap {
+func readArmap(filename string, f *obj.Biobuf, arhdr ArHdr) archiveMap {
 	is64 := arhdr.name == "/SYM64/"
 	wordSize := 4
 	if is64 {
 		wordSize = 8
 	}
 
-	contents := make([]byte, atolwhex(arhdr.size))
-	if _, err := io.ReadFull(f, contents); err != nil {
+	l := atolwhex(arhdr.size)
+	contents := make([]byte, l)
+	if obj.Bread(f, contents) != int(l) {
 		Exitf("short read from %s", filename)
 	}
 

@@ -76,6 +76,7 @@ var opnames = []string{
 	OINDEX:           "INDEX",
 	OINDEXMAP:        "INDEXMAP",
 	OKEY:             "KEY",
+	OPARAM:           "PARAM",
 	OLEN:             "LEN",
 	OMAKE:            "MAKE",
 	OMAKECHAN:        "MAKECHAN",
@@ -159,9 +160,5 @@ var opnames = []string{
 	OLROT:            "LROT",
 	ORROTC:           "RROTC",
 	ORETJMP:          "RETJMP",
-	OPS:              "PS",
-	OPC:              "PC",
-	OSQRT:            "SQRT",
-	OGETG:            "GETG",
 	OEND:             "END",
 }

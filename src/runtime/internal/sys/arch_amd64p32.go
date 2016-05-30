@@ -5,7 +5,7 @@
 package sys
 
 const (
-	ArchFamily    = AMD64
+	TheChar       = '6'
 	BigEndian     = 0
 	CacheLineSize = 64
 	PhysPageSize  = 65536*GoosNacl + 4096*(1-GoosNacl)

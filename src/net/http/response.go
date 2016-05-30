@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io"
 	"net/textproto"
 	"net/url"
@@ -34,7 +33,7 @@ type Response struct {
 	ProtoMajor int    // e.g. 1
 	ProtoMinor int    // e.g. 0
 
-	// Header maps header keys to values. If the response had multiple
+	// Header maps header keys to values.  If the response had multiple
 	// headers with the same key, they may be concatenated, with comma
 	// delimiters.  (Section 4.2 of RFC 2616 requires that multiple headers
 	// be semantically equivalent to a comma-delimited sequence.) Values
@@ -58,8 +57,8 @@ type Response struct {
 	// with a "chunked" Transfer-Encoding.
 	Body io.ReadCloser
 
-	// ContentLength records the length of the associated content. The
-	// value -1 indicates that the length is unknown. Unless Request.Method
+	// ContentLength records the length of the associated content.  The
+	// value -1 indicates that the length is unknown.  Unless Request.Method
 	// is "HEAD", values >= 0 indicate that the given number of bytes may
 	// be read from Body.
 	ContentLength int64
@@ -69,18 +68,9 @@ type Response struct {
 	TransferEncoding []string
 
 	// Close records whether the header directed that the connection be
-	// closed after reading Body. The value is advice for clients: neither
+	// closed after reading Body.  The value is advice for clients: neither
 	// ReadResponse nor Response.Write ever closes a connection.
 	Close bool
-
-	// Uncompressed reports whether the response was sent compressed but
-	// was decompressed by the http package. When true, reading from
-	// Body yields the uncompressed content instead of the compressed
-	// content actually set from the server, ContentLength is set to -1,
-	// and the "Content-Length" and "Content-Encoding" fields are deleted
-	// from the responseHeader. To get the original response from
-	// the server, set Transport.DisableCompression to true.
-	Uncompressed bool
 
 	// Trailer maps trailer keys to values in the same
 	// format as Header.
@@ -96,7 +86,7 @@ type Response struct {
 	// any trailer values sent by the server.
 	Trailer Header
 
-	// Request is the request that was sent to obtain this Response.
+	// The Request that was sent to obtain this Response.
 	// Request's Body is nil (having already been consumed).
 	// This is only populated for Client requests.
 	Request *Request
@@ -118,8 +108,8 @@ func (r *Response) Cookies() []*Cookie {
 var ErrNoLocation = errors.New("http: no Location header in response")
 
 // Location returns the URL of the response's "Location" header,
-// if present. Relative redirects are resolved relative to
-// the Response's Request. ErrNoLocation is returned if no
+// if present.  Relative redirects are resolved relative to
+// the Response's Request.  ErrNoLocation is returned if no
 // Location header is present.
 func (r *Response) Location() (*url.URL, error) {
 	lv := r.Header.Get("Location")
@@ -194,7 +184,7 @@ func ReadResponse(r *bufio.Reader, req *Request) (*Response, error) {
 	return resp, nil
 }
 
-// RFC 2616: Should treat
+// RFC2616: Should treat
 //	Pragma: no-cache
 // like
 //	Cache-Control: no-cache
@@ -238,13 +228,11 @@ func (r *Response) Write(w io.Writer) error {
 		if !ok {
 			text = "status code " + strconv.Itoa(r.StatusCode)
 		}
-	} else {
-		// Just to reduce stutter, if user set r.Status to "200 OK" and StatusCode to 200.
-		// Not important.
-		text = strings.TrimPrefix(text, strconv.Itoa(r.StatusCode)+" ")
 	}
-
-	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %03d %s\r\n", r.ProtoMajor, r.ProtoMinor, r.StatusCode, text); err != nil {
+	protoMajor, protoMinor := strconv.Itoa(r.ProtoMajor), strconv.Itoa(r.ProtoMinor)
+	statusCode := strconv.Itoa(r.StatusCode) + " "
+	text = strings.TrimPrefix(text, statusCode)
+	if _, err := io.WriteString(w, "HTTP/"+protoMajor+"."+protoMinor+" "+statusCode+text+"\r\n"); err != nil {
 		return err
 	}
 
@@ -277,7 +265,7 @@ func (r *Response) Write(w io.Writer) error {
 	// content-length, the only way to do that is the old HTTP/1.0
 	// way, by noting the EOF with a connection close, so we need
 	// to set Close.
-	if r1.ContentLength == -1 && !r1.Close && r1.ProtoAtLeast(1, 1) && !chunked(r1.TransferEncoding) && !r1.Uncompressed {
+	if r1.ContentLength == -1 && !r1.Close && r1.ProtoAtLeast(1, 1) && !chunked(r1.TransferEncoding) {
 		r1.Close = true
 	}
 

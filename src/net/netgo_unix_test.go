@@ -7,22 +7,18 @@
 
 package net
 
-import (
-	"context"
-	"testing"
-)
+import "testing"
 
 func TestGoLookupIP(t *testing.T) {
 	host := "localhost"
-	ctx := context.Background()
-	_, err, ok := cgoLookupIP(ctx, host)
+	_, err, ok := cgoLookupIP(host)
 	if ok {
 		t.Errorf("cgoLookupIP must be a placeholder")
 	}
 	if err != nil {
 		t.Error(err)
 	}
-	if _, err := goLookupIP(ctx, host); err != nil {
+	if _, err := goLookupIP(host); err != nil {
 		t.Error(err)
 	}
 }

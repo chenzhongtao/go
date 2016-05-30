@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -15,7 +15,6 @@
 package syscall
 
 import (
-	"io"
 	"sync"
 	"unsafe"
 )
@@ -368,9 +367,9 @@ func (f *fsysFile) seek(offset int64, whence int) (int64, error) {
 	f.fsys.mu.Lock()
 	defer f.fsys.mu.Unlock()
 	switch whence {
-	case io.SeekCurrent:
+	case 1:
 		offset += f.offset
-	case io.SeekEnd:
+	case 2:
 		offset += f.inode.Size
 	}
 	if offset < 0 {

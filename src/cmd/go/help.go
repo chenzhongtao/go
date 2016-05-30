@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors. All rights reserved.
+// Copyright 2011 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -148,6 +148,14 @@ A few common code hosting sites have special syntax:
 
 		import "github.com/user/project"
 		import "github.com/user/project/sub/directory"
+
+	Google Code Project Hosting (Git, Mercurial, Subversion)
+
+		import "code.google.com/p/project"
+		import "code.google.com/p/project/sub/directory"
+
+		import "code.google.com/p/project.subrepository"
+		import "code.google.com/p/project.subrepository/sub/directory"
 
 	Launchpad (Bazaar)
 
@@ -413,6 +421,12 @@ Vendor directories do not affect the placement of new repositories
 being checked out for the first time by 'go get': those are always
 placed in the main GOPATH, never in a vendor subtree.
 
+In Go 1.5, as an experiment, setting the environment variable
+GO15VENDOREXPERIMENT=1 enabled these features.
+As of Go 1.6 they are on by default. To turn them off, set
+GO15VENDOREXPERIMENT=0. In Go 1.7, the environment
+variable will stop having any effect.
+
 See https://golang.org/s/go15vendor for details.
 	`,
 }
@@ -483,6 +497,8 @@ Special-purpose environment variables:
 		installed in a location other than where it is built.
 		File names in stack traces are rewritten from GOROOT to
 		GOROOT_FINAL.
+	GO15VENDOREXPERIMENT
+		Set to 0 to disable vendoring semantics.
 	GO_EXTLINK_ENABLED
 		Whether the linker should use external linking mode
 		when using -linkmode=auto with code that uses cgo.
@@ -524,15 +540,7 @@ the extension of the file name. These extensions are:
 Files of each of these types except .syso may contain build
 constraints, but the go command stops scanning for build constraints
 at the first item in the file that is not a blank line or //-style
-line comment. See the go/build package documentation for
-more details.
-
-Non-test Go source files can also include a //go:binary-only-package
-comment, indicating that the package sources are included
-for documentation only and must not be used to build the
-package binary. This enables distribution of Go packages in
-their compiled form alone. See the go/build package documentation
-for more details.
+line comment.
 	`,
 }
 

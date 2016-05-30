@@ -277,8 +277,6 @@ func identical(x, y Type, p *ifacePair) bool {
 			return x.obj == y.obj
 		}
 
-	case nil:
-
 	default:
 		unreachable()
 	}

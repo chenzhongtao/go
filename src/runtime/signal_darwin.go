@@ -58,7 +58,7 @@ func sigtrampgo(fn uintptr, infostyle, sig uint32, info *siginfo, ctx unsafe.Poi
 	}
 	g := getg()
 	if g == nil {
-		badsignal(uintptr(sig), &sigctxt{info, ctx})
+		badsignal(uintptr(sig))
 		sigreturn(ctx, infostyle)
 		return
 	}

@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors. All rights reserved.
+//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,13 +32,13 @@ package x86
 
 import (
 	"cmd/internal/obj"
-	"cmd/internal/sys"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"math"
 )
 
-func CanUse1InsnTLS(ctxt *obj.Link) bool {
+func canuse1insntls(ctxt *obj.Link) bool {
 	if isAndroid {
 		// For android, we use a disgusting hack that assumes
 		// the thread-local storage slot for g is allocated
@@ -49,7 +49,7 @@ func CanUse1InsnTLS(ctxt *obj.Link) bool {
 		return true
 	}
 
-	if ctxt.Arch.RegSize == 4 {
+	if ctxt.Arch.Regsize == 4 {
 		switch ctxt.Headtype {
 		case obj.Hlinux,
 			obj.Hnacl,
@@ -66,7 +66,7 @@ func CanUse1InsnTLS(ctxt *obj.Link) bool {
 		obj.Hwindows:
 		return false
 	case obj.Hlinux:
-		return !ctxt.Flag_shared
+		return ctxt.Flag_shared == 0
 	}
 
 	return true
@@ -75,7 +75,7 @@ func CanUse1InsnTLS(ctxt *obj.Link) bool {
 func progedit(ctxt *obj.Link, p *obj.Prog) {
 	// Maintain information about code generation mode.
 	if ctxt.Mode == 0 {
-		ctxt.Mode = ctxt.Arch.RegSize * 8
+		ctxt.Mode = ctxt.Arch.Regsize * 8
 	}
 	p.Mode = int8(ctxt.Mode)
 
@@ -130,7 +130,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 	// rewriting the instructions more comprehensively, and it only does because
 	// we only support a single TLS variable (g).
 
-	if CanUse1InsnTLS(ctxt) {
+	if canuse1insntls(ctxt) {
 		// Reduce 2-instruction sequence to 1-instruction sequence.
 		// Sequences like
 		//	MOVQ TLS, BX
@@ -189,7 +189,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 		}
 	}
 
-	// Rewrite 0 to $0 in 3rd argument to CMPPS etc.
+	// Rewrite 0 to $0 in 3rd argment to CMPPS etc.
 	// That's what the tables expect.
 	switch p.As {
 	case ACMPPD, ACMPPS, ACMPSD, ACMPSS:
@@ -207,7 +207,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 	}
 
 	// Rewrite MOVL/MOVQ $XXX(FP/SP) as LEAL/LEAQ.
-	if p.From.Type == obj.TYPE_ADDR && (ctxt.Arch.Family == sys.AMD64 || p.From.Name != obj.NAME_EXTERN && p.From.Name != obj.NAME_STATIC) {
+	if p.From.Type == obj.TYPE_ADDR && (ctxt.Arch.Thechar == '6' || p.From.Name != obj.NAME_EXTERN && p.From.Name != obj.NAME_STATIC) {
 		switch p.As {
 		case AMOVL:
 			p.As = ALEAL
@@ -231,8 +231,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 	// Convert AMOVSS $(0), Xx to AXORPS Xx, Xx
 	case AMOVSS:
 		if p.From.Type == obj.TYPE_FCONST {
-			//  f == 0 can't be used here due to -0, so use Float64bits
-			if f := p.From.Val.(float64); math.Float64bits(f) == 0 {
+			if p.From.Val.(float64) == 0 {
 				if p.To.Type == obj.TYPE_REG && REG_X0 <= p.To.Reg && p.To.Reg <= REG_X15 {
 					p.As = AXORPS
 					p.From = p.To
@@ -272,8 +271,7 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 	case AMOVSD:
 		// Convert AMOVSD $(0), Xx to AXORPS Xx, Xx
 		if p.From.Type == obj.TYPE_FCONST {
-			//  f == 0 can't be used here due to -0, so use Float64bits
-			if f := p.From.Val.(float64); math.Float64bits(f) == 0 {
+			if p.From.Val.(float64) == 0 {
 				if p.To.Type == obj.TYPE_REG && REG_X0 <= p.To.Reg && p.To.Reg <= REG_X15 {
 					p.As = AXORPS
 					p.From = p.To
@@ -314,15 +312,14 @@ func progedit(ctxt *obj.Link, p *obj.Prog) {
 		rewriteToUseGot(ctxt, p)
 	}
 
-	if ctxt.Flag_shared && p.Mode == 32 {
+	if ctxt.Flag_shared != 0 && p.Mode == 32 {
 		rewriteToPcrel(ctxt, p)
 	}
 }
 
 // Rewrite p, if necessary, to access global data via the global offset table.
 func rewriteToUseGot(ctxt *obj.Link, p *obj.Prog) {
-	var add, lea, mov obj.As
-	var reg int16
+	var add, lea, mov, reg int16
 	if p.Mode == 64 {
 		add = AADDQ
 		lea = ALEAQ
@@ -378,7 +375,7 @@ func rewriteToUseGot(ctxt *obj.Link, p *obj.Prog) {
 	}
 	if p.From.Type == obj.TYPE_ADDR && p.From.Name == obj.NAME_EXTERN && !p.From.Sym.Local {
 		// $MOV $sym, Rx becomes $MOV sym@GOT, Rx
-		// $MOV $sym+<off>, Rx becomes $MOV sym@GOT, Rx; $LEA <off>(Rx), Rx
+		// $MOV $sym+<off>, Rx becomes $MOV sym@GOT, Rx; $ADD <off>, Rx
 		// On 386 only, more complicated things like PUSHL $sym become $MOV sym@GOT, CX; PUSHL CX
 		cmplxdest := false
 		pAs := p.As
@@ -400,9 +397,8 @@ func rewriteToUseGot(ctxt *obj.Link, p *obj.Prog) {
 		q := p
 		if p.From.Offset != 0 {
 			q = obj.Appendp(ctxt, p)
-			q.As = lea
-			q.From.Type = obj.TYPE_MEM
-			q.From.Reg = p.To.Reg
+			q.As = add
+			q.From.Type = obj.TYPE_CONST
 			q.From.Offset = p.From.Offset
 			q.To = p.To
 			p.From.Offset = 0
@@ -610,11 +606,12 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 	}
 
 	var bpsize int
-	if p.Mode == 64 && ctxt.Framepointer_enabled && autoffset > 0 && p.From3.Offset&obj.NOFRAME == 0 {
-		// Make room for to save a base pointer. If autoffset == 0,
+	if p.Mode == 64 && obj.Framepointer_enabled != 0 && autoffset > 0 {
+		// Make room for to save a base pointer.  If autoffset == 0,
 		// this might do something special like a tail jump to
 		// another function, so in that case we omit this.
-		bpsize = ctxt.Arch.PtrSize
+		bpsize = ctxt.Arch.Ptrsize
+
 		autoffset += int32(bpsize)
 		p.To.Offset += int64(bpsize)
 	} else {
@@ -655,7 +652,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 	}
 
 	if autoffset != 0 {
-		if autoffset%int32(ctxt.Arch.RegSize) != 0 {
+		if autoffset%int32(ctxt.Arch.Regsize) != 0 {
 			ctxt.Diag("unaligned stack size %d", autoffset)
 		}
 		p = obj.Appendp(ctxt, p)
@@ -670,10 +667,10 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 		p = obj.Appendp(ctxt, p)
 
 		p.As = obj.ANOP
-		p.Spadj = int32(-ctxt.Arch.PtrSize)
+		p.Spadj = int32(-ctxt.Arch.Ptrsize)
 		p = obj.Appendp(ctxt, p)
 		p.As = obj.ANOP
-		p.Spadj = int32(ctxt.Arch.PtrSize)
+		p.Spadj = int32(ctxt.Arch.Ptrsize)
 	}
 
 	deltasp := autoffset
@@ -723,7 +720,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 		p.As = AMOVQ
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = REG_CX
-		p.From.Offset = 4 * int64(ctxt.Arch.PtrSize) // G.panic
+		p.From.Offset = 4 * int64(ctxt.Arch.Ptrsize) // G.panic
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_BX
 		if ctxt.Headtype == obj.Hnacl && p.Mode == 64 {
@@ -756,7 +753,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 		p.As = ALEAQ
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = REG_SP
-		p.From.Offset = int64(autoffset) + int64(ctxt.Arch.RegSize)
+		p.From.Offset = int64(autoffset) + int64(ctxt.Arch.Regsize)
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_DI
 		if ctxt.Headtype == obj.Hnacl || p.Mode == 32 {
@@ -934,7 +931,7 @@ func indir_cx(ctxt *obj.Link, p *obj.Prog, a *obj.Addr) {
 // Returns last new instruction.
 func load_g_cx(ctxt *obj.Link, p *obj.Prog) *obj.Prog {
 	p.As = AMOVQ
-	if ctxt.Arch.PtrSize == 4 {
+	if ctxt.Arch.Ptrsize == 4 {
 		p.As = AMOVL
 	}
 	p.From.Type = obj.TYPE_MEM
@@ -979,13 +976,13 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 		//	CMPQ SP, stackguard
 		p = obj.Appendp(ctxt, p)
 
-		p.As = cmp
+		p.As = int16(cmp)
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REG_SP
 		indir_cx(ctxt, p, &p.To)
-		p.To.Offset = 2 * int64(ctxt.Arch.PtrSize) // G.stackguard0
-		if ctxt.Cursym.Cfunc {
-			p.To.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
+		p.To.Offset = 2 * int64(ctxt.Arch.Ptrsize) // G.stackguard0
+		if ctxt.Cursym.Cfunc != 0 {
+			p.To.Offset = 3 * int64(ctxt.Arch.Ptrsize) // G.stackguard1
 		}
 	} else if framesize <= obj.StackBig {
 		// large stack: SP-framesize <= stackguard-StackSmall
@@ -993,7 +990,7 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 		//	CMPQ AX, stackguard
 		p = obj.Appendp(ctxt, p)
 
-		p.As = lea
+		p.As = int16(lea)
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = REG_SP
 		p.From.Offset = -(int64(framesize) - obj.StackSmall)
@@ -1001,13 +998,13 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 		p.To.Reg = REG_AX
 
 		p = obj.Appendp(ctxt, p)
-		p.As = cmp
+		p.As = int16(cmp)
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REG_AX
 		indir_cx(ctxt, p, &p.To)
-		p.To.Offset = 2 * int64(ctxt.Arch.PtrSize) // G.stackguard0
-		if ctxt.Cursym.Cfunc {
-			p.To.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
+		p.To.Offset = 2 * int64(ctxt.Arch.Ptrsize) // G.stackguard0
+		if ctxt.Cursym.Cfunc != 0 {
+			p.To.Offset = 3 * int64(ctxt.Arch.Ptrsize) // G.stackguard1
 		}
 	} else {
 		// Such a large stack we need to protect against wraparound.
@@ -1027,17 +1024,17 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 
 		p = obj.Appendp(ctxt, p)
 
-		p.As = mov
+		p.As = int16(mov)
 		indir_cx(ctxt, p, &p.From)
-		p.From.Offset = 2 * int64(ctxt.Arch.PtrSize) // G.stackguard0
-		if ctxt.Cursym.Cfunc {
-			p.From.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
+		p.From.Offset = 2 * int64(ctxt.Arch.Ptrsize) // G.stackguard0
+		if ctxt.Cursym.Cfunc != 0 {
+			p.From.Offset = 3 * int64(ctxt.Arch.Ptrsize) // G.stackguard1
 		}
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_SI
 
 		p = obj.Appendp(ctxt, p)
-		p.As = cmp
+		p.As = int16(cmp)
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REG_SI
 		p.To.Type = obj.TYPE_CONST
@@ -1052,7 +1049,7 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 		q1 = p
 
 		p = obj.Appendp(ctxt, p)
-		p.As = lea
+		p.As = int16(lea)
 		p.From.Type = obj.TYPE_MEM
 		p.From.Reg = REG_SP
 		p.From.Offset = obj.StackGuard
@@ -1060,14 +1057,14 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 		p.To.Reg = REG_AX
 
 		p = obj.Appendp(ctxt, p)
-		p.As = sub
+		p.As = int16(sub)
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REG_SI
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = REG_AX
 
 		p = obj.Appendp(ctxt, p)
-		p.As = cmp
+		p.As = int16(cmp)
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = REG_AX
 		p.To.Type = obj.TYPE_CONST
@@ -1094,7 +1091,7 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32, textarg int32) *ob
 	call.To.Type = obj.TYPE_BRANCH
 	morestack := "runtime.morestack"
 	switch {
-	case ctxt.Cursym.Cfunc:
+	case ctxt.Cursym.Cfunc != 0:
 		morestack = "runtime.morestackc"
 	case ctxt.Cursym.Text.From3Offset()&obj.NEEDCTXT == 0:
 		morestack = "runtime.morestack_noctxt"
@@ -1125,7 +1122,7 @@ func follow(ctxt *obj.Link, s *obj.LSym) {
 	s.Text = firstp.Link
 }
 
-func nofollow(a obj.As) bool {
+func nofollow(a int) bool {
 	switch a {
 	case obj.AJMP,
 		obj.ARET,
@@ -1142,7 +1139,7 @@ func nofollow(a obj.As) bool {
 	return false
 }
 
-func pushpop(a obj.As) bool {
+func pushpop(a int) bool {
 	switch a {
 	case APUSHL,
 		APUSHFL,
@@ -1162,7 +1159,7 @@ func pushpop(a obj.As) bool {
 	return false
 }
 
-func relinv(a obj.As) obj.As {
+func relinv(a int16) int16 {
 	switch a {
 	case AJEQ:
 		return AJNE
@@ -1198,14 +1195,14 @@ func relinv(a obj.As) obj.As {
 		return AJOS
 	}
 
-	log.Fatalf("unknown relation: %s", obj.Aconv(a))
+	log.Fatalf("unknown relation: %s", obj.Aconv(int(a)))
 	return 0
 }
 
 func xfol(ctxt *obj.Link, p *obj.Prog, last **obj.Prog) {
 	var q *obj.Prog
 	var i int
-	var a obj.As
+	var a int
 
 loop:
 	if p == nil {
@@ -1215,16 +1212,16 @@ loop:
 		q = p.Pcond
 		if q != nil && q.As != obj.ATEXT {
 			/* mark instruction as done and continue layout at target of jump */
-			p.Mark |= DONE
+			p.Mark = 1
 
 			p = q
-			if p.Mark&DONE == 0 {
+			if p.Mark == 0 {
 				goto loop
 			}
 		}
 	}
 
-	if p.Mark&DONE != 0 {
+	if p.Mark != 0 {
 		/*
 		 * p goes here, but already used it elsewhere.
 		 * copy up to 4 instructions or else branch to other copy.
@@ -1238,7 +1235,7 @@ loop:
 			if q == *last {
 				break
 			}
-			a = q.As
+			a = int(q.As)
 			if a == obj.ANOP {
 				i--
 				continue
@@ -1247,7 +1244,7 @@ loop:
 			if nofollow(a) || pushpop(a) {
 				break // NOTE(rsc): arm does goto copy
 			}
-			if q.Pcond == nil || q.Pcond.Mark&DONE != 0 {
+			if q.Pcond == nil || q.Pcond.Mark != 0 {
 				continue
 			}
 			if a == obj.ACALL || a == ALOOP {
@@ -1261,10 +1258,10 @@ loop:
 
 				q = obj.Copyp(ctxt, p)
 				p = p.Link
-				q.Mark |= DONE
+				q.Mark = 1
 				(*last).Link = q
 				*last = q
-				if q.As != a || q.Pcond == nil || q.Pcond.Mark&DONE != 0 {
+				if int(q.As) != a || q.Pcond == nil || q.Pcond.Mark != 0 {
 					continue
 				}
 
@@ -1274,7 +1271,7 @@ loop:
 				q.Link = p
 				xfol(ctxt, q.Link, last)
 				p = q.Link
-				if p.Mark&DONE != 0 {
+				if p.Mark != 0 {
 					return
 				}
 				goto loop
@@ -1291,11 +1288,11 @@ loop:
 	}
 
 	/* emit p */
-	p.Mark |= DONE
+	p.Mark = 1
 
 	(*last).Link = p
 	*last = p
-	a = p.As
+	a = int(p.As)
 
 	/* continue loop with what comes after p */
 	if nofollow(a) {
@@ -1321,7 +1318,7 @@ loop:
 				 * expect conditional jump to be taken.
 				 * rewrite so that's the fall-through case.
 				 */
-				p.As = relinv(a)
+				p.As = relinv(int16(a))
 
 				q = p.Link
 				p.Link = p.Pcond
@@ -1329,9 +1326,9 @@ loop:
 			}
 		} else {
 			q = p.Link
-			if q.Mark&DONE != 0 {
+			if q.Mark != 0 {
 				if a != ALOOP {
-					p.As = relinv(a)
+					p.As = relinv(int16(a))
 					p.Link = p.Pcond
 					p.Pcond = q
 				}
@@ -1339,7 +1336,7 @@ loop:
 		}
 
 		xfol(ctxt, p.Link, last)
-		if p.Pcond.Mark&DONE != 0 {
+		if p.Pcond.Mark != 0 {
 			return
 		}
 		p = p.Pcond
@@ -1350,7 +1347,7 @@ loop:
 	goto loop
 }
 
-var unaryDst = map[obj.As]bool{
+var unaryDst = map[int]bool{
 	ABSWAPL:    true,
 	ABSWAPQ:    true,
 	ACMPXCHG8B: true,
@@ -1401,28 +1398,43 @@ var unaryDst = map[obj.As]bool{
 }
 
 var Linkamd64 = obj.LinkArch{
-	Arch:       sys.ArchAMD64,
+	ByteOrder:  binary.LittleEndian,
+	Name:       "amd64",
+	Thechar:    '6',
 	Preprocess: preprocess,
 	Assemble:   span6,
 	Follow:     follow,
 	Progedit:   progedit,
 	UnaryDst:   unaryDst,
+	Minlc:      1,
+	Ptrsize:    8,
+	Regsize:    8,
 }
 
 var Linkamd64p32 = obj.LinkArch{
-	Arch:       sys.ArchAMD64P32,
+	ByteOrder:  binary.LittleEndian,
+	Name:       "amd64p32",
+	Thechar:    '6',
 	Preprocess: preprocess,
 	Assemble:   span6,
 	Follow:     follow,
 	Progedit:   progedit,
 	UnaryDst:   unaryDst,
+	Minlc:      1,
+	Ptrsize:    4,
+	Regsize:    8,
 }
 
 var Link386 = obj.LinkArch{
-	Arch:       sys.Arch386,
+	ByteOrder:  binary.LittleEndian,
+	Name:       "386",
+	Thechar:    '8',
 	Preprocess: preprocess,
 	Assemble:   span6,
 	Follow:     follow,
 	Progedit:   progedit,
 	UnaryDst:   unaryDst,
+	Minlc:      1,
+	Ptrsize:    4,
+	Regsize:    4,
 }

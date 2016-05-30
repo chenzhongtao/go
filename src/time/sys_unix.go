@@ -55,9 +55,9 @@ func closefd(fd uintptr) {
 }
 
 func preadn(fd uintptr, buf []byte, off int) error {
-	whence := seekStart
+	whence := 0
 	if off < 0 {
-		whence = seekEnd
+		whence = 2
 	}
 	if _, err := syscall.Seek(int(fd), int64(off), whence); err != nil {
 		return err

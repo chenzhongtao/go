@@ -85,7 +85,7 @@ func blockcopy(n, res *gc.Node, osrc, odst, w int64) {
 
 	// if we are copying forward on the stack and
 	// the src and dst overlap, then reverse direction
-	if osrc < odst && odst < osrc+w {
+	if osrc < odst && int64(odst) < int64(osrc)+w {
 		// reverse direction
 		gins(x86.ASTD, nil, nil) // set direction flag
 		if c > 0 {

@@ -2,7 +2,7 @@
 
 package sys
 
-const GOARCH = `mips64`
+const TheGoarch = `mips64`
 
 const Goarch386 = 0
 const GoarchAmd64 = 0

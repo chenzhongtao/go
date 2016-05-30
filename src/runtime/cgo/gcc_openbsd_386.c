@@ -1,6 +1,8 @@
-// Copyright 2009 The Go Authors. All rights reserved.
+// Copyright 2009 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
+
+// +build cgo
 
 #include <sys/types.h>
 #include <dlfcn.h>
@@ -13,15 +15,9 @@
 static void* threadentry(void*);
 static void (*setg_gcc)(void*);
 
-// TCB_SIZE is sizeof(struct thread_control_block), as defined in
-// /usr/src/lib/librthread/tcb.h on OpenBSD 5.9 and earlier.
+// TCB_SIZE is sizeof(struct thread_control_block),
+// as defined in /usr/src/lib/librthread/tcb.h
 #define TCB_SIZE (4 * sizeof(void *))
-
-// TIB_SIZE is sizeof(struct tib), as defined in
-// /usr/include/tib.h on OpenBSD 6.0 and later.
-#define TIB_SIZE (4 * sizeof(void *) + 6 * sizeof(int))
-
-// TLS_SIZE is the size of TLS needed for Go.
 #define TLS_SIZE (2 * sizeof(void *))
 
 void *__get_tcb(void);
@@ -35,38 +31,25 @@ struct thread_args {
 	void *arg;
 };
 
-static int has_tib = 0;
-
 static void
 tcb_fixup(int mainthread)
 {
-	void *tls, *newtcb, *oldtcb;
-	size_t tls_size, tcb_size;
-
-	// TODO(jsing): Remove once OpenBSD 6.1 is released and OpenBSD 5.9 is
-	// no longer supported.
+	void *newtcb, *oldtcb;
 
 	// The OpenBSD ld.so(1) does not currently support PT_TLS. As a result,
 	// we need to allocate our own TLS space while preserving the existing
-	// TCB or TIB that has been setup via librthread.
+	// TCB that has been setup via librthread.
 
-	tcb_size = has_tib ? TIB_SIZE : TCB_SIZE;
-	tls_size = TLS_SIZE + tcb_size;
-	tls = malloc(tls_size);
-	if(tls == NULL)
+	newtcb = malloc(TCB_SIZE + TLS_SIZE);
+	if(newtcb == NULL)
 		abort();
 
 	// The signal trampoline expects the TLS slots to be zeroed.
-	bzero(tls, TLS_SIZE);
+	bzero(newtcb, TLS_SIZE);
 
 	oldtcb = __get_tcb();
-	newtcb = tls + TLS_SIZE;
-	bcopy(oldtcb, newtcb, tcb_size);
-	if(has_tib) {
-		 // Fix up self pointer.
-		*(uintptr_t *)(newtcb) = (uintptr_t)newtcb;
-	}
-	__set_tcb(newtcb);
+	bcopy(oldtcb, newtcb + TLS_SIZE, TCB_SIZE);
+	__set_tcb(newtcb + TLS_SIZE);
 
 	// NOTE(jsing, minux): we can't free oldtcb without causing double-free
 	// problem. so newtcb will be memory leaks. Get rid of this when OpenBSD
@@ -97,10 +80,6 @@ static void init_pthread_wrapper(void) {
 	if(sys_pthread_create == NULL) {
 		fprintf(stderr, "runtime/cgo: dlsym failed to find pthread_create: %s\n", dlerror());
 		abort();
-	}
-	// _rthread_init is hidden in OpenBSD librthread that has TIB.
-	if(dlsym(handle, "_rthread_init") == NULL) {
-		has_tib = 1;
 	}
 	dlclose(handle);
 }
@@ -167,7 +146,6 @@ _cgo_sys_thread_start(ThreadStart *ts)
 
 	pthread_attr_init(&attr);
 	pthread_attr_getstacksize(&attr, &size);
-
 	// Leave stacklo=0 and set stackhi=size; mstack will do the rest.
 	ts->g->stackhi = size;
 	err = sys_pthread_create(&p, &attr, threadentry, ts);

@@ -22,16 +22,12 @@ const (
 	trailerStr = "\x3b"
 )
 
-// lzwEncode returns an LZW encoding (with 2-bit literals) of in.
-func lzwEncode(in []byte) []byte {
+// lzwEncode returns an LZW encoding (with 2-bit literals) of n zeroes.
+func lzwEncode(n int) []byte {
 	b := &bytes.Buffer{}
 	w := lzw.NewWriter(b, lzw.LSB, 2)
-	if _, err := w.Write(in); err != nil {
-		panic(err)
-	}
-	if err := w.Close(); err != nil {
-		panic(err)
-	}
+	w.Write(make([]byte, n))
+	w.Close()
 	return b.Bytes()
 }
 
@@ -57,7 +53,7 @@ func TestDecode(t *testing.T) {
 		// byte, and 2-bit LZW literals.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 		if tc.nPix > 0 {
-			enc := lzwEncode(make([]byte, tc.nPix))
+			enc := lzwEncode(tc.nPix)
 			if len(enc) > 0xff {
 				t.Errorf("nPix=%d, extra=%t: compressed length %d is too large", tc.nPix, tc.extra, len(enc))
 				continue
@@ -101,13 +97,13 @@ func TestTransparentIndex(t *testing.T) {
 	for transparentIndex := 0; transparentIndex < 3; transparentIndex++ {
 		if transparentIndex < 2 {
 			// Write the graphic control for the transparent index.
-			b.WriteString("\x21\xf9\x04\x01\x00\x00")
+			b.WriteString("\x21\xf9\x00\x01\x00\x00")
 			b.WriteByte(byte(transparentIndex))
 			b.WriteByte(0)
 		}
 		// Write an image with bounds 2x1, as per TestDecode.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
-		enc := lzwEncode([]byte{0x00, 0x00})
+		enc := lzwEncode(2)
 		if len(enc) > 0xff {
 			t.Fatalf("compressed length %d is too large", len(enc))
 		}
@@ -200,13 +196,21 @@ func TestNoPalette(t *testing.T) {
 	b.WriteString(headerStr[:len(headerStr)-3])
 	b.WriteString("\x00\x00\x00") // No global palette.
 
-	// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
+	// Image descriptor: 2x1, no local palette.
 	b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 
 	// Encode the pixels: neither is in range, because there is no palette.
-	enc := lzwEncode([]byte{0x00, 0x03})
-	b.WriteByte(byte(len(enc)))
-	b.Write(enc)
+	pix := []byte{0, 3}
+	enc := &bytes.Buffer{}
+	w := lzw.NewWriter(enc, lzw.LSB, 2)
+	if _, err := w.Write(pix); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	b.WriteByte(byte(len(enc.Bytes())))
+	b.Write(enc.Bytes())
 	b.WriteByte(0x00) // An empty block signifies the end of the image data.
 
 	b.WriteString(trailerStr)
@@ -222,13 +226,21 @@ func TestPixelOutsidePaletteRange(t *testing.T) {
 		b.WriteString(headerStr)
 		b.WriteString(paletteStr)
 
-		// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
+		// Image descriptor: 2x1, no local palette.
 		b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
 
 		// Encode the pixels; some pvals trigger the expected error.
-		enc := lzwEncode([]byte{pval, pval})
-		b.WriteByte(byte(len(enc)))
-		b.Write(enc)
+		pix := []byte{pval, pval}
+		enc := &bytes.Buffer{}
+		w := lzw.NewWriter(enc, lzw.LSB, 2)
+		if _, err := w.Write(pix); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		b.WriteByte(byte(len(enc.Bytes())))
+		b.Write(enc.Bytes())
 		b.WriteByte(0x00) // An empty block signifies the end of the image data.
 
 		b.WriteString(trailerStr)
@@ -240,36 +252,6 @@ func TestPixelOutsidePaletteRange(t *testing.T) {
 		}
 		try(t, b.Bytes(), want)
 	}
-}
-
-func TestTransparentPixelOutsidePaletteRange(t *testing.T) {
-	b := &bytes.Buffer{}
-
-	// Manufacture a GIF with a 2 color palette.
-	b.WriteString(headerStr)
-	b.WriteString(paletteStr)
-
-	// Graphic Control Extension: transparency, transparent color index = 3.
-	//
-	// This index, 3, is out of range of the global palette and there is no
-	// local palette in the subsequent image descriptor. This is an error
-	// according to the spec, but Firefox and Google Chrome seem OK with this.
-	//
-	// See golang.org/issue/15059.
-	b.WriteString("\x21\xf9\x04\x01\x00\x00\x03\x00")
-
-	// Image descriptor: 2x1, no local palette, and 2-bit LZW literals.
-	b.WriteString("\x2c\x00\x00\x00\x00\x02\x00\x01\x00\x00\x02")
-
-	// Encode the pixels.
-	enc := lzwEncode([]byte{0x03, 0x03})
-	b.WriteByte(byte(len(enc)))
-	b.Write(enc)
-	b.WriteByte(0x00) // An empty block signifies the end of the image data.
-
-	b.WriteString(trailerStr)
-
-	try(t, b.Bytes(), "")
 }
 
 func TestLoopCount(t *testing.T) {

@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -34,9 +34,6 @@ func MustHavePerl(t *testing.T) {
 	case "plan9", "windows":
 		t.Skipf("skipping test: perl not available on %s", runtime.GOOS)
 	}
-	if _, err := exec.LookPath("perl"); err != nil {
-		t.Skipf("skipping test: perl not found in path")
-	}
 }
 
 var (
@@ -45,11 +42,11 @@ var (
 )
 
 func Build(t *testing.T) {
-	testenv.MustHaveGoBuild(t)
-	MustHavePerl(t)
 	if built {
 		return
 	}
+	testenv.MustHaveGoBuild(t)
+	MustHavePerl(t)
 	if failed {
 		t.Skip("cannot run on this environment")
 	}
@@ -68,8 +65,7 @@ func Vet(t *testing.T, files []string) {
 	flags := []string{
 		"./" + binary,
 		"-printfuncs=Warn:1,Warnf:1",
-		"-all",
-		"-shadow",
+		"-test", // TODO: Delete once -shadow is part of -all.
 	}
 	cmd := exec.Command(errchk, append(flags, files...)...)
 	if !run(cmd, t) {

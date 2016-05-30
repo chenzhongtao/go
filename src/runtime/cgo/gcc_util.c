@@ -1,8 +1,35 @@
-// Copyright 2009 The Go Authors. All rights reserved.
+// Copyright 2009 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build cgo
+
 #include "libcgo.h"
+
+/* Stub for calling malloc from Go */
+void
+x_cgo_malloc(void *p)
+{
+	struct a {
+		long long n;
+		void *ret;
+	} *a = p;
+
+	a->ret = malloc(a->n);
+	if(a->ret == NULL && a->n == 0)
+		a->ret = malloc(1);
+}
+
+/* Stub for calling free from Go */
+void
+x_cgo_free(void *p)
+{
+	struct a {
+		void *arg;
+	} *a = p;
+
+	free(a->arg);
+}
 
 /* Stub for creating a new thread */
 void

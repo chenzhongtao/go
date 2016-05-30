@@ -1,6 +1,6 @@
 // skip
 
-// Copyright 2012 The Go Authors. All rights reserved.
+// Copyright 2012 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -34,11 +34,9 @@ import (
 
 var (
 	verbose        = flag.Bool("v", false, "verbose. if set, parallelism is set to 1.")
-	keep           = flag.Bool("k", false, "keep. keep temporary directory.")
 	numParallel    = flag.Int("n", runtime.NumCPU(), "number of parallel tests to run")
 	summary        = flag.Bool("summary", false, "show summary of results")
 	showSkips      = flag.Bool("show_skips", false, "show skipped tests")
-	runSkips       = flag.Bool("run_skips", false, "run skipped tests (ignore skip and build tags)")
 	linkshared     = flag.Bool("linkshared", false, "")
 	updateErrors   = flag.Bool("update_errors", false, "update error messages in test file based on compiler output")
 	runoutputLimit = flag.Int("l", defaultRunOutputLimit(), "number of parallel runoutput tests to run")
@@ -122,9 +120,9 @@ func main() {
 		<-test.donec
 		status := "ok  "
 		errStr := ""
-		if e, isSkip := test.err.(skipError); isSkip {
+		if _, isSkip := test.err.(skipError); isSkip {
 			test.err = nil
-			errStr = "unexpected skip for " + path.Join(test.dir, test.gofile) + ": " + string(e)
+			errStr = "unexpected skip for " + path.Join(test.dir, test.gofile) + ": " + errStr
 			status = "FAIL"
 		}
 		if test.err != nil {
@@ -202,9 +200,8 @@ func compileFile(runcmd runCmd, longname string) (out []byte, err error) {
 	return runcmd(cmd...)
 }
 
-func compileInDir(runcmd runCmd, dir string, flags []string, names ...string) (out []byte, err error) {
+func compileInDir(runcmd runCmd, dir string, names ...string) (out []byte, err error) {
 	cmd := []string{"go", "tool", "compile", "-e", "-D", ".", "-I", "."}
-	cmd = append(cmd, flags...)
 	if *linkshared {
 		cmd = append(cmd, "-dynlink", "-installsuffix=dynlink")
 	}
@@ -342,9 +339,6 @@ type context struct {
 // shouldTest looks for build tags in a source file and returns
 // whether the file should be used according to the tags.
 func shouldTest(src string, goos, goarch string) (ok bool, whyNot string) {
-	if *runSkips {
-		return true, ""
-	}
 	for _, line := range strings.Split(src, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "//") {
@@ -479,9 +473,6 @@ func (t *test) run() {
 		fallthrough
 	case "compile", "compiledir", "build", "run", "runoutput", "rundir":
 		t.action = action
-	case "errorcheckandrundir":
-		wantError = false // should be no error if also will run
-		fallthrough
 	case "errorcheck", "errorcheckdir", "errorcheckoutput":
 		t.action = action
 		wantError = true
@@ -494,9 +485,6 @@ func (t *test) run() {
 			args = args[1:]
 		}
 	case "skip":
-		if *runSkips {
-			break
-		}
 		t.action = "skip"
 		return
 	default:
@@ -506,9 +494,7 @@ func (t *test) run() {
 	}
 
 	t.makeTempDir()
-	if !*keep {
-		defer os.RemoveAll(t.tempDir)
-	}
+	defer os.RemoveAll(t.tempDir)
 
 	err = ioutil.WriteFile(filepath.Join(t.tempDir, t.gofile), srcBytes, 0644)
 	check(err)
@@ -522,7 +508,6 @@ func (t *test) run() {
 	}
 
 	useTmp := true
-	ssaMain := false
 	runcmd := func(args ...string) ([]byte, error) {
 		cmd := exec.Command(args[0], args[1:]...)
 		var buf bytes.Buffer
@@ -531,11 +516,6 @@ func (t *test) run() {
 		if useTmp {
 			cmd.Dir = t.tempDir
 			cmd.Env = envForDir(cmd.Dir)
-		} else {
-			cmd.Env = os.Environ()
-		}
-		if ssaMain && os.Getenv("GOARCH") == "amd64" {
-			cmd.Env = append(cmd.Env, "GOSSAPKG=main")
 		}
 		err := cmd.Run()
 		if err != nil {
@@ -584,13 +564,13 @@ func (t *test) run() {
 			return
 		}
 		for _, gofiles := range pkgs {
-			_, t.err = compileInDir(runcmd, longdir, flags, gofiles...)
+			_, t.err = compileInDir(runcmd, longdir, gofiles...)
 			if t.err != nil {
 				return
 			}
 		}
 
-	case "errorcheckdir", "errorcheckandrundir":
+	case "errorcheckdir":
 		// errorcheck all files in lexicographic order
 		// useful for finding importing errors
 		longdir := filepath.Join(cwd, t.goDirName())
@@ -600,7 +580,7 @@ func (t *test) run() {
 			return
 		}
 		for i, gofiles := range pkgs {
-			out, err := compileInDir(runcmd, longdir, flags, gofiles...)
+			out, err := compileInDir(runcmd, longdir, gofiles...)
 			if i == len(pkgs)-1 {
 				if wantError && err == nil {
 					t.err = fmt.Errorf("compilation succeeded unexpectedly\n%s", out)
@@ -622,10 +602,6 @@ func (t *test) run() {
 				break
 			}
 		}
-		if action == "errorcheckdir" {
-			return
-		}
-		fallthrough
 
 	case "rundir":
 		// Compile all files in the directory in lexicographic order.
@@ -637,7 +613,7 @@ func (t *test) run() {
 			return
 		}
 		for i, gofiles := range pkgs {
-			_, err := compileInDir(runcmd, longdir, flags, gofiles...)
+			_, err := compileInDir(runcmd, longdir, gofiles...)
 			if err != nil {
 				t.err = err
 				return
@@ -671,7 +647,6 @@ func (t *test) run() {
 
 	case "run":
 		useTmp = false
-		ssaMain = true
 		cmd := []string{"go", "run"}
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
@@ -707,7 +682,6 @@ func (t *test) run() {
 			t.err = fmt.Errorf("write tempfile:%s", err)
 			return
 		}
-		ssaMain = true
 		cmd = []string{"go", "run"}
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
@@ -785,9 +759,6 @@ func (t *test) makeTempDir() {
 	var err error
 	t.tempDir, err = ioutil.TempDir("", "")
 	check(err)
-	if *keep {
-		log.Printf("Temporary directory is %s", t.tempDir)
-	}
 }
 
 func (t *test) expectedOutput() string {
@@ -809,7 +780,7 @@ func splitOutput(out string) []string {
 		}
 		if strings.HasPrefix(line, "\t") {
 			res[len(res)-1] += "\n" + line
-		} else if strings.HasPrefix(line, "go tool") || strings.HasPrefix(line, "<autogenerated>") || strings.HasPrefix(line, "#") {
+		} else if strings.HasPrefix(line, "go tool") || strings.HasPrefix(line, "<autogenerated>") {
 			continue
 		} else if strings.TrimSpace(line) != "" {
 			res = append(res, line)
@@ -884,8 +855,7 @@ func (t *test) errorCheck(outStr string, fullshort ...string) (err error) {
 	return errors.New(buf.String())
 }
 
-func (t *test) updateErrors(out, file string) {
-	base := path.Base(file)
+func (t *test) updateErrors(out string, file string) {
 	// Read in source file.
 	src, err := ioutil.ReadFile(file)
 	if err != nil {
@@ -919,8 +889,6 @@ func (t *test) updateErrors(out, file string) {
 			continue
 		}
 		msg := errStr[colon2+2:]
-		msg = strings.Replace(msg, file, base, -1) // normalize file mentions in error itself
-		msg = strings.TrimLeft(msg, " \t")
 		for _, r := range []string{`\`, `*`, `+`, `[`, `]`, `(`, `)`} {
 			msg = strings.Replace(msg, r, `\`+r, -1)
 		}

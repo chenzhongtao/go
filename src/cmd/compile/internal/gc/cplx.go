@@ -89,9 +89,8 @@ func subnode(nr *Node, ni *Node, nc *Node) {
 	t := Types[tc]
 
 	if nc.Op == OLITERAL {
-		u := nc.Val().U.(*Mpcplx)
-		nodfconst(nr, t, &u.Real)
-		nodfconst(ni, t, &u.Imag)
+		nodfconst(nr, t, &nc.Val().U.(*Mpcplx).Real)
+		nodfconst(ni, t, &nc.Val().U.(*Mpcplx).Imag)
 		return
 	}
 
@@ -230,20 +229,20 @@ func nodfconst(n *Node, t *Type, fval *Mpflt) {
 	n.SetVal(Val{fval})
 	n.Type = t
 
-	if !t.IsFloat() {
+	if !Isfloat[t.Etype] {
 		Fatalf("nodfconst: bad type %v", t)
 	}
 }
 
 func Complexop(n *Node, res *Node) bool {
 	if n != nil && n.Type != nil {
-		if n.Type.IsComplex() {
+		if Iscomplex[n.Type.Etype] {
 			goto maybe
 		}
 	}
 
 	if res != nil && res.Type != nil {
-		if res.Type.IsComplex() {
+		if Iscomplex[res.Type.Etype] {
 			goto maybe
 		}
 	}
@@ -399,12 +398,13 @@ func Complexgen(n *Node, res *Node) {
 	switch n.Op {
 	default:
 		Dump("complexgen: unknown op", n)
-		Fatalf("complexgen: unknown op %v", n.Op)
+		Fatalf("complexgen: unknown op %v", Oconv(int(n.Op), 0))
 
 	case ODOT,
 		ODOTPTR,
 		OINDEX,
 		OIND,
+		ONAME, // PHEAP or PPARAMREF var
 		OCALLFUNC,
 		OCALLMETH,
 		OCALLINTER:
@@ -457,7 +457,7 @@ func Complexgen(n *Node, res *Node) {
 
 	switch n.Op {
 	default:
-		Fatalf("complexgen: unknown op %v", n.Op)
+		Fatalf("complexgen: unknown op %v", Oconv(int(n.Op), 0))
 
 	case OCONV:
 		Complexmove(nl, res)

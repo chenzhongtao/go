@@ -21,7 +21,7 @@ func initMimePlan9() {
 }
 
 var typeFiles = []string{
-	"/sys/lib/mimetype",
+	"/sys/lib/mimetypes",
 }
 
 func initMimeForTests() map[string]string {

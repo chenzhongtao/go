@@ -7,15 +7,10 @@
 package runtime_test
 
 import (
-	"bytes"
-	"fmt"
-	"internal/testenv"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestCgoCrashHandler(t *testing.T) {
@@ -51,8 +46,6 @@ func TestCgoCallbackGC(t *testing.T) {
 			t.Skip("see golang.org/issue/11990")
 		case runtime.GOOS == "linux" && runtime.GOARCH == "arm":
 			t.Skip("too slow for arm builders")
-		case runtime.GOOS == "linux" && (runtime.GOARCH == "mips64" || runtime.GOARCH == "mips64le"):
-			t.Skip("too slow for mips64x builders")
 		}
 	}
 	got := runTestProg(t, "testprogcgo", "CgoCallbackGC")
@@ -152,114 +145,5 @@ func TestEnsureDropM(t *testing.T) {
 	want := "OK\n"
 	if got != want {
 		t.Errorf("expected %q, got %v", want, got)
-	}
-}
-
-// Test for issue 14387.
-// Test that the program that doesn't need any cgo pointer checking
-// takes about the same amount of time with it as without it.
-func TestCgoCheckBytes(t *testing.T) {
-	// Make sure we don't count the build time as part of the run time.
-	testenv.MustHaveGoBuild(t)
-	exe, err := buildTestProg(t, "testprogcgo")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Try it 10 times to avoid flakiness.
-	const tries = 10
-	var tot1, tot2 time.Duration
-	for i := 0; i < tries; i++ {
-		cmd := testEnv(exec.Command(exe, "CgoCheckBytes"))
-		cmd.Env = append(cmd.Env, "GODEBUG=cgocheck=0", fmt.Sprintf("GO_CGOCHECKBYTES_TRY=%d", i))
-
-		start := time.Now()
-		cmd.Run()
-		d1 := time.Since(start)
-
-		cmd = testEnv(exec.Command(exe, "CgoCheckBytes"))
-		cmd.Env = append(cmd.Env, fmt.Sprintf("GO_CGOCHECKBYTES_TRY=%d", i))
-
-		start = time.Now()
-		cmd.Run()
-		d2 := time.Since(start)
-
-		if d1*20 > d2 {
-			// The slow version (d2) was less than 20 times
-			// slower than the fast version (d1), so OK.
-			return
-		}
-
-		tot1 += d1
-		tot2 += d2
-	}
-
-	t.Errorf("cgo check too slow: got %v, expected at most %v", tot2/tries, (tot1/tries)*20)
-}
-
-func TestCgoPanicDeadlock(t *testing.T) {
-	// test issue 14432
-	got := runTestProg(t, "testprogcgo", "CgoPanicDeadlock")
-	want := "panic: cgo error\n\n"
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("output does not start with %q:\n%s", want, got)
-	}
-}
-
-func TestCgoCCodeSIGPROF(t *testing.T) {
-	got := runTestProg(t, "testprogcgo", "CgoCCodeSIGPROF")
-	want := "OK\n"
-	if got != want {
-		t.Errorf("expected %q got %v", want, got)
-	}
-}
-
-func TestCgoCrashTraceback(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	got := runTestProg(t, "testprogcgo", "CrashTraceback")
-	for i := 1; i <= 3; i++ {
-		if !strings.Contains(got, fmt.Sprintf("cgo symbolizer:%d", i)) {
-			t.Errorf("missing cgo symbolizer:%d", i)
-		}
-	}
-}
-
-func TestCgoTracebackContext(t *testing.T) {
-	got := runTestProg(t, "testprogcgo", "TracebackContext")
-	want := "OK\n"
-	if got != want {
-		t.Errorf("expected %q got %v", want, got)
-	}
-}
-
-func TestCgoPprof(t *testing.T) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		t.Skipf("not yet supported on %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	testenv.MustHaveGoRun(t)
-
-	exe, err := buildTestProg(t, "testprogcgo")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := testEnv(exec.Command(exe, "CgoPprof")).CombinedOutput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	fn := strings.TrimSpace(string(got))
-	defer os.Remove(fn)
-
-	top, err := exec.Command("go", "tool", "pprof", "-top", "-nodecount=1", exe, fn).CombinedOutput()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Logf("%s", top)
-
-	if !bytes.Contains(top, []byte("cpuHog")) {
-		t.Error("missing cpuHog in pprof output")
 	}
 }

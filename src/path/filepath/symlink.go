@@ -100,7 +100,7 @@ func walkSymlinks(path string) (string, error) {
 			return "", err
 		}
 		if runtime.GOOS == "windows" {
-			// walkLinks(".", ...) always returns "." on unix.
+			// walkLinks(".", ...) always retuns "." on unix.
 			// But on windows it returns symlink target, if current
 			// directory is a symlink. Stop the walk, if symlink
 			// target is not absolute path, and return "."

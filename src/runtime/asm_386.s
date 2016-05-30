@@ -54,7 +54,6 @@ bad_proc: // show that the program requires MMX.
 has_cpuid:
 	MOVL	$0, AX
 	CPUID
-	MOVL	AX, SI
 	CMPL	AX, $0
 	JE	nocpuinfo
 
@@ -70,7 +69,6 @@ has_cpuid:
 	MOVB	$1, runtime·lfenceBeforeRdtsc(SB)
 notintel:
 
-	// Load EAX=1 cpuid flags
 	MOVL	$1, AX
 	CPUID
 	MOVL	CX, AX // Move to global variable clobbers CX when generating PIC
@@ -80,14 +78,6 @@ notintel:
 	// Check for MMX support
 	TESTL	$(1<<23), DX	// MMX
 	JZ 	bad_proc
-
-	// Load EAX=7/ECX=0 cpuid flags
-	CMPL	SI, $7
-	JLT	nocpuinfo
-	MOVL	$7, AX
-	MOVL	$0, CX
-	CPUID
-	MOVL	BX, runtime·cpuid_ebx7(SB)
 
 nocpuinfo:	
 
@@ -236,7 +226,7 @@ TEXT runtime·gogo(SB), NOSPLIT, $0-4
 
 // func mcall(fn func(*g))
 // Switch to m->g0's stack, call fn(g).
-// Fn must never return. It should gogo(&g->sched)
+// Fn must never return.  It should gogo(&g->sched)
 // to keep running g.
 TEXT runtime·mcall(SB), NOSPLIT, $0-4
 	MOVL	fn+0(FP), DI
@@ -269,7 +259,7 @@ TEXT runtime·mcall(SB), NOSPLIT, $0-4
 	RET
 
 // systemstack_switch is a dummy routine that systemstack leaves at the bottom
-// of the G stack. We need to distinguish the routine that
+// of the G stack.  We need to distinguish the routine that
 // lives at the bottom of the G stack from the one that lives
 // at the top of the system stack because the one at the top of
 // the system stack terminates the stack walk (see topofstack()).
@@ -301,7 +291,7 @@ TEXT runtime·systemstack(SB), NOSPLIT, $0-4
 	CALL	AX
 
 switch:
-	// save our state in g->sched. Pretend to
+	// save our state in g->sched.  Pretend to
 	// be systemstack_switch if the G stack is scanned.
 	MOVL	$runtime·systemstack_switch(SB), (g_sched+gobuf_pc)(AX)
 	MOVL	SP, (g_sched+gobuf_sp)(AX)
@@ -612,25 +602,23 @@ noswitch:
 	MOVL	AX, ret+8(FP)
 	RET
 
-// cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
+// cgocallback(void (*fn)(void*), void *frame, uintptr framesize)
 // Turn the fn into a Go func (by taking its address) and call
 // cgocallback_gofunc.
-TEXT runtime·cgocallback(SB),NOSPLIT,$16-16
+TEXT runtime·cgocallback(SB),NOSPLIT,$12-12
 	LEAL	fn+0(FP), AX
 	MOVL	AX, 0(SP)
 	MOVL	frame+4(FP), AX
 	MOVL	AX, 4(SP)
 	MOVL	framesize+8(FP), AX
 	MOVL	AX, 8(SP)
-	MOVL	ctxt+12(FP), AX
-	MOVL	AX, 12(SP)
 	MOVL	$runtime·cgocallback_gofunc(SB), AX
 	CALL	AX
 	RET
 
-// cgocallback_gofunc(FuncVal*, void *frame, uintptr framesize, uintptr ctxt)
+// cgocallback_gofunc(FuncVal*, void *frame, uintptr framesize)
 // See cgocall.go for more details.
-TEXT ·cgocallback_gofunc(SB),NOSPLIT,$12-16
+TEXT ·cgocallback_gofunc(SB),NOSPLIT,$12-12
 	NO_LOCAL_POINTERS
 
 	// If g is nil, Go did not create the current thread.
@@ -698,19 +686,17 @@ havem:
 	// so that the traceback will seamlessly trace back into
 	// the earlier calls.
 	//
-	// In the new goroutine, 4(SP) holds the saved oldm (DX) register.
-	// 8(SP) is unused.
+	// In the new goroutine, 0(SP) holds the saved oldm (DX) register.
+	// 4(SP) and 8(SP) are unused.
 	MOVL	m_curg(BP), SI
 	MOVL	SI, g(CX)
 	MOVL	(g_sched+gobuf_sp)(SI), DI // prepare stack as DI
 	MOVL	(g_sched+gobuf_pc)(SI), BP
 	MOVL	BP, -4(DI)
-	MOVL	ctxt+12(FP), CX
 	LEAL	-(4+12)(DI), SP
-	MOVL	DX, 4(SP)
-	MOVL	CX, 0(SP)
+	MOVL	DX, 0(SP)
 	CALL	runtime·cgocallbackg(SB)
-	MOVL	4(SP), DX
+	MOVL	0(SP), DX
 
 	// Restore g->sched (== m->curg->sched) from saved values.
 	get_tls(CX)
@@ -914,7 +900,7 @@ final1:
 	RET
 
 endofpage:
-	// address ends in 1111xxxx. Might be up against
+	// address ends in 1111xxxx.  Might be up against
 	// a page boundary, so load ending at last byte.
 	// Then shift bytes down using pshufb.
 	MOVOU	-32(AX)(BX*1), X1
@@ -1159,7 +1145,7 @@ DATA masks<>+0xfc(SB)/4, $0x00ffffff
 
 GLOBL masks<>(SB),RODATA,$256
 
-// these are arguments to pshufb. They move data down from
+// these are arguments to pshufb.  They move data down from
 // the high bytes of the register to the low bytes of the register.
 // index is how many bytes to move.
 DATA shifts<>+0x00(SB)/4, $0x00000000
@@ -1253,18 +1239,12 @@ TEXT ·checkASM(SB),NOSPLIT,$0-1
 	SETEQ	ret+0(FP)
 	RET
 
-// memequal(p, q unsafe.Pointer, size uintptr) bool
-TEXT runtime·memequal(SB),NOSPLIT,$0-13
+TEXT runtime·memeq(SB),NOSPLIT,$0-13
 	MOVL	a+0(FP), SI
 	MOVL	b+4(FP), DI
-	CMPL	SI, DI
-	JEQ	eq
 	MOVL	size+8(FP), BX
 	LEAL	ret+12(FP), AX
 	JMP	runtime·memeqbody(SB)
-eq:
-	MOVB    $1, ret+12(FP)
-	RET
 
 // memequal_varlen(a, b unsafe.Pointer) bool
 TEXT runtime·memequal_varlen(SB),NOSPLIT,$0-9
@@ -1384,7 +1364,7 @@ small:
 	MOVL	(SI), SI
 	JMP	si_finish
 si_high:
-	// address ends in 111111xx. Load up to bytes we want, move to correct position.
+	// address ends in 111111xx.  Load up to bytes we want, move to correct position.
 	MOVL	-4(SI)(BX*1), SI
 	SHRL	CX, SI
 si_finish:
@@ -1620,7 +1600,7 @@ TEXT runtime·prefetcht2(SB),NOSPLIT,$0-4
 TEXT runtime·prefetchnta(SB),NOSPLIT,$0-4
 	RET
 
-// Add a module's moduledata to the linked list of moduledata objects. This
+// Add a module's moduledata to the linked list of moduledata objects.  This
 // is called from .init_array by a function generated in the linker and so
 // follows the platform ABI wrt register preservation -- it only touches AX,
 // CX (implicitly) and DX, but it does not follow the ABI wrt arguments:

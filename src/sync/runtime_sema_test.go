@@ -25,9 +25,6 @@ func BenchmarkSemaUncontended(b *testing.B) {
 }
 
 func benchmarkSema(b *testing.B, block, work bool) {
-	if b.N == 0 {
-		return
-	}
 	sem := uint32(0)
 	if block {
 		done := make(chan bool)

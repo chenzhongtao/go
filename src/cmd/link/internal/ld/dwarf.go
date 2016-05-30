@@ -17,78 +17,158 @@ package ld
 import (
 	"cmd/internal/obj"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 )
 
-const infoprefix = "go.dwarf.info."
-
 /*
  * Offsets and sizes of the debug_* sections in the cout file.
  */
+var abbrevo int64
+
+var abbrevsize int64
+
 var abbrevsym *LSym
-var arangessec *LSym
-var framesec *LSym
+
+var abbrevsympos int64
+
+var lineo int64
+
+var linesize int64
+
+var linesym *LSym
+
+var linesympos int64
+
+var infoo int64 // also the base for DWDie->offs and reference attributes.
+
+var infosize int64
+
+var infosym *LSym
+
+var infosympos int64
+
+var frameo int64
+
+var framesize int64
+
+var framesym *LSym
+
+var framesympos int64
+
+var pubnameso int64
+
+var pubnamessize int64
+
+var pubtypeso int64
+
+var pubtypessize int64
+
+var arangeso int64
+
+var arangessize int64
+
+var gdbscripto int64
+
+var gdbscriptsize int64
+
 var infosec *LSym
+
+var inforeloco int64
+
+var inforelocsize int64
+
+var arangessec *LSym
+
+var arangesreloco int64
+
+var arangesrelocsize int64
+
 var linesec *LSym
+
+var linereloco int64
+
+var linerelocsize int64
+
+var framesec *LSym
+
+var framereloco int64
+
+var framerelocsize int64
 
 var gdbscript string
 
 /*
  *  Basic I/O
  */
-func addrput(s *LSym, addr int64) {
-	switch SysArch.PtrSize {
+func addrput(addr int64) {
+	switch Thearch.Ptrsize {
 	case 4:
-		Adduint32(Ctxt, s, uint32(addr))
+		Thearch.Lput(uint32(addr))
 
 	case 8:
-		Adduint64(Ctxt, s, uint64(addr))
+		Thearch.Vput(uint64(addr))
 	}
 }
 
-func appendUleb128(b []byte, v uint64) []byte {
+func uleb128enc(v uint64, dst []byte) int {
+	var c uint8
+
+	length := uint8(0)
 	for {
-		c := uint8(v & 0x7f)
+		c = uint8(v & 0x7f)
 		v >>= 7
 		if v != 0 {
 			c |= 0x80
 		}
-		b = append(b, c)
+		if dst != nil {
+			dst[0] = byte(c)
+			dst = dst[1:]
+		}
+		length++
 		if c&0x80 == 0 {
 			break
 		}
 	}
-	return b
+
+	return int(length)
 }
 
-func appendSleb128(b []byte, v int64) []byte {
+func sleb128enc(v int64, dst []byte) int {
+	var c uint8
+	var s uint8
+
+	length := uint8(0)
 	for {
-		c := uint8(v & 0x7f)
-		s := uint8(v & 0x40)
+		c = uint8(v & 0x7f)
+		s = uint8(v & 0x40)
 		v >>= 7
 		if (v != -1 || s == 0) && (v != 0 || s != 0) {
 			c |= 0x80
 		}
-		b = append(b, c)
+		if dst != nil {
+			dst[0] = byte(c)
+			dst = dst[1:]
+		}
+		length++
 		if c&0x80 == 0 {
 			break
 		}
 	}
-	return b
+
+	return int(length)
 }
 
 var encbuf [10]byte
 
-func uleb128put(s *LSym, v int64) {
-	b := appendUleb128(encbuf[:0], uint64(v))
-	Addbytes(Ctxt, s, b)
+func uleb128put(v int64) {
+	n := uleb128enc(uint64(v), encbuf[:])
+	Cwrite(encbuf[:n])
 }
 
-func sleb128put(s *LSym, v int64) {
-	b := appendSleb128(encbuf[:0], v)
-	Addbytes(Ctxt, s, b)
+func sleb128put(v int64) {
+	n := sleb128enc(v, encbuf[:])
+	Cwrite(encbuf[:n])
 }
 
 /*
@@ -399,34 +479,41 @@ var abbrevs = [DW_NABRV]DWAbbrev{
 	},
 }
 
-var dwarfp *LSym
-
-func writeabbrev() *LSym {
-	s := Linklookup(Ctxt, ".debug_abbrev", 0)
-	s.Type = obj.SDWARFSECT
-	abbrevsym = s
-
+func writeabbrev() {
+	abbrevo = Cpos()
 	for i := 1; i < DW_NABRV; i++ {
 		// See section 7.5.3
-		uleb128put(s, int64(i))
+		uleb128put(int64(i))
 
-		uleb128put(s, int64(abbrevs[i].tag))
-		Adduint8(Ctxt, s, abbrevs[i].children)
+		uleb128put(int64(abbrevs[i].tag))
+		Cput(abbrevs[i].children)
 		for _, f := range abbrevs[i].attr {
-			uleb128put(s, int64(f.attr))
-			uleb128put(s, int64(f.form))
+			uleb128put(int64(f.attr))
+			uleb128put(int64(f.form))
 		}
-		uleb128put(s, 0)
-		uleb128put(s, 0)
+		uleb128put(0)
+		uleb128put(0)
 	}
 
-	Adduint8(Ctxt, s, 0)
-	return s
+	Cput(0)
+	abbrevsize = Cpos() - abbrevo
 }
 
 /*
  * Debugging Information Entries and their attributes.
  */
+const (
+	HASHSIZE = 107
+)
+
+func dwarfhashstr(s string) uint32 {
+	h := uint32(0)
+	for s != "" {
+		h = h + h + h + uint32(s[0])
+		s = s[1:]
+	}
+	return h % HASHSIZE
+}
 
 // For DW_CLS_string and _block, value should contain the length, and
 // data the data, for _reference, value is 0 and data is a DWDie* to
@@ -446,7 +533,11 @@ type DWDie struct {
 	link   *DWDie
 	child  *DWDie
 	attr   *DWAttr
-	sym    *LSym
+	// offset into .debug_info section, i.e relative to
+	// infoo. only valid after call to putdie()
+	offs  int64
+	hash  []*DWDie // optional index of children by name, enabled by mkindex()
+	hlink *DWDie   // bucket chain in parent's index
 }
 
 /*
@@ -495,8 +586,9 @@ func getattr(die *DWDie, attr uint16) *DWAttr {
 }
 
 // Every DIE has at least a DW_AT_name attribute (but it will only be
-// written out if it is listed in the abbrev).
-func newdie(parent *DWDie, abbrev int, name string, version int) *DWDie {
+// written out if it is listed in the abbrev).	If its parent is
+// keeping an index, the new DIE will be inserted there.
+func newdie(parent *DWDie, abbrev int, name string) *DWDie {
 	die := new(DWDie)
 	die.abbrev = abbrev
 	die.link = parent.child
@@ -504,15 +596,17 @@ func newdie(parent *DWDie, abbrev int, name string, version int) *DWDie {
 
 	newattr(die, DW_AT_name, DW_CLS_STRING, int64(len(name)), name)
 
-	if name != "" && (abbrev <= DW_ABRV_VARIABLE || abbrev >= DW_ABRV_NULLTYPE) {
-		if abbrev != DW_ABRV_VARIABLE || version == 0 {
-			die.sym = Linklookup(Ctxt, infoprefix+name, version)
-			die.sym.Attr |= AttrHidden
-			die.sym.Type = obj.SDWARFINFO
-		}
+	if parent.hash != nil {
+		h := int(dwarfhashstr(name))
+		die.hlink = parent.hash[h]
+		parent.hash[h] = die
 	}
 
 	return die
+}
+
+func mkindex(die *DWDie) {
+	die.hash = make([]*DWDie, HASHSIZE)
 }
 
 func walktypedef(die *DWDie) *DWDie {
@@ -528,157 +622,179 @@ func walktypedef(die *DWDie) *DWDie {
 	return die
 }
 
-func walksymtypedef(s *LSym) *LSym {
-	if t := Linkrlookup(Ctxt, s.Name+".def", int(s.Version)); t != nil {
-		return t
-	}
-	return s
-}
-
 // Find child by AT_name using hashtable if available or linear scan
 // if not.
-func findchild(die *DWDie, name string) *DWDie {
+func find(die *DWDie, name string) *DWDie {
 	var prev *DWDie
 	for ; die != prev; prev, die = die, walktypedef(die) {
-		for a := die.child; a != nil; a = a.link {
-			if name == getattr(a, DW_AT_name).data {
-				return a
+
+		if die.hash == nil {
+			for a := die.child; a != nil; a = a.link {
+				if name == getattr(a, DW_AT_name).data {
+					return a
+				}
 			}
+			continue
 		}
-		continue
+
+		h := int(dwarfhashstr(name))
+		a := die.hash[h]
+
+		if a == nil {
+			continue
+		}
+
+		if name == getattr(a, DW_AT_name).data {
+			return a
+		}
+
+		// Move found ones to head of the list.
+		for b := a.hlink; b != nil; b = b.hlink {
+			if name == getattr(b, DW_AT_name).data {
+				a.hlink = b.hlink
+				b.hlink = die.hash[h]
+				die.hash[h] = b
+				return b
+			}
+			a = b
+		}
 	}
 	return nil
 }
 
-// Used to avoid string allocation when looking up dwarf symbols
-var prefixBuf = []byte(infoprefix)
-
-func find(name string) *LSym {
-	n := append(prefixBuf, name...)
-	// The string allocation below is optimized away because it is only used in a map lookup.
-	s := Linkrlookup(Ctxt, string(n), 0)
-	prefixBuf = n[:len(infoprefix)]
-	return s
-}
-
-func mustFind(name string) *LSym {
-	r := find(name)
+func mustFind(die *DWDie, name string) *DWDie {
+	r := find(die, name)
 	if r == nil {
-		Exitf("dwarf find: cannot find %s", name)
+		Exitf("dwarf find: %s %p has no %s", getattr(die, DW_AT_name).data, die, name)
 	}
 	return r
 }
 
-func adddwarfref(ctxt *Link, s *LSym, t *LSym, size int) int64 {
-	var result int64
-	switch size {
-	default:
-		Diag("invalid size %d in adddwarfref\n", size)
-		fallthrough
-	case SysArch.PtrSize:
-		result = Addaddr(ctxt, s, t)
-	case 4:
-		result = addaddrplus4(ctxt, s, t, 0)
+func adddwarfrel(sec *LSym, sym *LSym, offsetbase int64, siz int, addend int64) {
+	r := Addrel(sec)
+	r.Sym = sym
+	r.Xsym = sym
+	r.Off = int32(Cpos() - offsetbase)
+	r.Siz = uint8(siz)
+	r.Type = obj.R_ADDR
+	r.Add = addend
+	r.Xadd = addend
+	if Iself && Thearch.Thechar == '6' {
+		addend = 0
 	}
-	r := &s.R[len(s.R)-1]
-	r.Type = obj.R_DWARFREF
-	return result
+	if HEADTYPE == obj.Hdarwin {
+		addend += sym.Value
+	}
+	switch siz {
+	case 4:
+		Thearch.Lput(uint32(addend))
+
+	case 8:
+		Thearch.Vput(uint64(addend))
+
+	default:
+		Diag("bad size in adddwarfrel")
+	}
 }
 
-func newrefattr(die *DWDie, attr uint16, ref *LSym) *DWAttr {
+func newrefattr(die *DWDie, attr uint16, ref *DWDie) *DWAttr {
 	if ref == nil {
 		return nil
 	}
 	return newattr(die, attr, DW_CLS_REFERENCE, 0, ref)
 }
 
-func putattr(s *LSym, abbrev int, form int, cls int, value int64, data interface{}) {
+var fwdcount int
+
+func putattr(abbrev int, form int, cls int, value int64, data interface{}) {
 	switch form {
 	case DW_FORM_addr: // address
 		if Linkmode == LinkExternal {
 			value -= (data.(*LSym)).Value
-			Addaddrplus(Ctxt, s, data.(*LSym), value)
+			adddwarfrel(infosec, data.(*LSym), infoo, Thearch.Ptrsize, value)
 			break
 		}
 
-		addrput(s, value)
+		addrput(value)
 
 	case DW_FORM_block1: // block
 		if cls == DW_CLS_ADDRESS {
-			Adduint8(Ctxt, s, uint8(1+SysArch.PtrSize))
-			Adduint8(Ctxt, s, DW_OP_addr)
-			Addaddr(Ctxt, s, data.(*LSym))
+			Cput(uint8(1 + Thearch.Ptrsize))
+			Cput(DW_OP_addr)
+			if Linkmode == LinkExternal {
+				value -= (data.(*LSym)).Value
+				adddwarfrel(infosec, data.(*LSym), infoo, Thearch.Ptrsize, value)
+				break
+			}
+
+			addrput(value)
 			break
 		}
 
 		value &= 0xff
-		Adduint8(Ctxt, s, uint8(value))
+		Cput(uint8(value))
 		p := data.([]byte)
 		for i := 0; int64(i) < value; i++ {
-			Adduint8(Ctxt, s, p[i])
+			Cput(uint8(p[i]))
 		}
 
 	case DW_FORM_block2: // block
 		value &= 0xffff
 
-		Adduint16(Ctxt, s, uint16(value))
+		Thearch.Wput(uint16(value))
 		p := data.([]byte)
 		for i := 0; int64(i) < value; i++ {
-			Adduint8(Ctxt, s, p[i])
+			Cput(uint8(p[i]))
 		}
 
 	case DW_FORM_block4: // block
 		value &= 0xffffffff
 
-		Adduint32(Ctxt, s, uint32(value))
+		Thearch.Lput(uint32(value))
 		p := data.([]byte)
 		for i := 0; int64(i) < value; i++ {
-			Adduint8(Ctxt, s, p[i])
+			Cput(uint8(p[i]))
 		}
 
 	case DW_FORM_block: // block
-		uleb128put(s, value)
+		uleb128put(value)
 
 		p := data.([]byte)
 		for i := 0; int64(i) < value; i++ {
-			Adduint8(Ctxt, s, p[i])
+			Cput(uint8(p[i]))
 		}
 
 	case DW_FORM_data1: // constant
-		Adduint8(Ctxt, s, uint8(value))
+		Cput(uint8(value))
 
 	case DW_FORM_data2: // constant
-		Adduint16(Ctxt, s, uint16(value))
+		Thearch.Wput(uint16(value))
 
 	case DW_FORM_data4: // constant, {line,loclist,mac,rangelist}ptr
 		if Linkmode == LinkExternal && cls == DW_CLS_PTR {
-			adddwarfref(Ctxt, s, linesec, 4)
+			adddwarfrel(infosec, linesym, infoo, 4, value)
 			break
 		}
 
-		Adduint32(Ctxt, s, uint32(value))
+		Thearch.Lput(uint32(value))
 
 	case DW_FORM_data8: // constant, {line,loclist,mac,rangelist}ptr
-		Adduint64(Ctxt, s, uint64(value))
+		Thearch.Vput(uint64(value))
 
 	case DW_FORM_sdata: // constant
-		sleb128put(s, value)
+		sleb128put(value)
 
 	case DW_FORM_udata: // constant
-		uleb128put(s, value)
+		uleb128put(value)
 
 	case DW_FORM_string: // string
-		str := data.(string)
-		Addstring(s, str)
-		for i := int64(len(str)); i < value; i++ {
-			Adduint8(Ctxt, s, 0)
-		}
+		strnput(data.(string), int(value+1))
 
 	case DW_FORM_flag: // flag
 		if value != 0 {
-			Adduint8(Ctxt, s, 1)
+			Cput(1)
 		} else {
-			Adduint8(Ctxt, s, 0)
+			Cput(0)
 		}
 
 		// In DWARF 2 (which is what we claim to generate),
@@ -688,14 +804,22 @@ func putattr(s *LSym, abbrev int, form int, cls int, value int64, data interface
 	case DW_FORM_ref_addr: // reference to a DIE in the .info section
 		if data == nil {
 			Diag("dwarf: null reference in %d", abbrev)
-			if SysArch.PtrSize == 8 {
-				Adduint64(Ctxt, s, 0) // invalid dwarf, gdb will complain.
+			if Thearch.Ptrsize == 8 {
+				Thearch.Vput(0) // invalid dwarf, gdb will complain.
 			} else {
-				Adduint32(Ctxt, s, 0) // invalid dwarf, gdb will complain.
+				Thearch.Lput(0) // invalid dwarf, gdb will complain.
 			}
 		} else {
-			dsym := data.(*LSym)
-			adddwarfref(Ctxt, s, dsym, SysArch.PtrSize)
+			off := (data.(*DWDie)).offs
+			if off == 0 {
+				fwdcount++
+			}
+			if Linkmode == LinkExternal {
+				adddwarfrel(infosec, infosym, infoo, Thearch.Ptrsize, off)
+				break
+			}
+
+			addrput(off)
 		}
 
 	case DW_FORM_ref1, // reference within the compilation unit
@@ -714,45 +838,34 @@ func putattr(s *LSym, abbrev int, form int, cls int, value int64, data interface
 
 // Note that we can (and do) add arbitrary attributes to a DIE, but
 // only the ones actually listed in the Abbrev will be written out.
-func putattrs(s *LSym, abbrev int, attr *DWAttr) {
+func putattrs(abbrev int, attr *DWAttr) {
 Outer:
 	for _, f := range abbrevs[abbrev].attr {
 		for ap := attr; ap != nil; ap = ap.link {
 			if ap.atr == f.attr {
-				putattr(s, abbrev, int(f.form), int(ap.cls), ap.value, ap.data)
+				putattr(abbrev, int(f.form), int(ap.cls), ap.value, ap.data)
 				continue Outer
 			}
 		}
 
-		putattr(s, abbrev, int(f.form), 0, 0, nil)
+		putattr(abbrev, int(f.form), 0, 0, nil)
 	}
 }
 
-func putdies(prev *LSym, die *DWDie) *LSym {
+func putdies(die *DWDie) {
 	for ; die != nil; die = die.link {
-		prev = putdie(prev, die)
+		putdie(die)
 	}
-	Adduint8(Ctxt, prev, 0)
-	return prev
 }
 
-func putdie(prev *LSym, die *DWDie) *LSym {
-	s := die.sym
-	if s == nil {
-		s = prev
-	} else {
-		if s.Attr.OnList() {
-			log.Fatalf("symbol %s listed multiple times", s.Name)
-		}
-		s.Attr |= AttrOnList
-		prev.Next = s
-	}
-	uleb128put(s, int64(die.abbrev))
-	putattrs(s, die.abbrev, die.attr)
+func putdie(die *DWDie) {
+	die.offs = Cpos() - infoo
+	uleb128put(int64(die.abbrev))
+	putattrs(die.abbrev, die.attr)
 	if abbrevs[die.abbrev].children != 0 {
-		return putdies(s, die.child)
+		putdies(die.child)
+		Cput(0)
 	}
-	return s
 }
 
 func reverselist(list **DWDie) {
@@ -779,9 +892,12 @@ func reversetree(list **DWDie) {
 
 func newmemberoffsetattr(die *DWDie, offs int32) {
 	var block [20]byte
-	b := append(block[:0], DW_OP_plus_uconst)
-	b = appendUleb128(b, uint64(offs))
-	newattr(die, DW_AT_data_member_location, DW_CLS_BLOCK, int64(len(b)), b)
+
+	i := 0
+	block[i] = DW_OP_plus_uconst
+	i++
+	i += uleb128enc(uint64(offs), block[i:])
+	newattr(die, DW_AT_data_member_location, DW_CLS_BLOCK, int64(i), block[:i])
 }
 
 // GDB doesn't like DW_FORM_addr for DW_AT_location, so emit a
@@ -819,50 +935,44 @@ func dotypedef(parent *DWDie, name string, def *DWDie) {
 		Diag("dwarf: bad def in dotypedef")
 	}
 
-	def.sym = Linklookup(Ctxt, def.sym.Name+".def", 0)
-	def.sym.Attr |= AttrHidden
-	def.sym.Type = obj.SDWARFINFO
-
 	// The typedef entry must be created after the def,
 	// so that future lookups will find the typedef instead
 	// of the real definition. This hooks the typedef into any
 	// circular definition loops, so that gdb can understand them.
-	die := newdie(parent, DW_ABRV_TYPEDECL, name, 0)
+	die := newdie(parent, DW_ABRV_TYPEDECL, name)
 
-	newrefattr(die, DW_AT_type, def.sym)
+	newrefattr(die, DW_AT_type, def)
 }
 
 // Define gotype, for composite ones recurse into constituents.
-func defgotype(gotype *LSym) *LSym {
+func defgotype(gotype *LSym) *DWDie {
 	if gotype == nil {
-		return mustFind("<unspecified>")
+		return mustFind(&dwtypes, "<unspecified>")
 	}
 
 	if !strings.HasPrefix(gotype.Name, "type.") {
-		Diag("dwarf: type name doesn't start with \"type.\": %s", gotype.Name)
-		return mustFind("<unspecified>")
+		Diag("dwarf: type name doesn't start with \".type\": %s", gotype.Name)
+		return mustFind(&dwtypes, "<unspecified>")
 	}
 
 	name := gotype.Name[5:] // could also decode from Type.string
 
-	sdie := find(name)
+	die := find(&dwtypes, name)
 
-	if sdie != nil {
-		return sdie
+	if die != nil {
+		return die
 	}
 
-	return newtype(gotype).sym
-}
+	if false && Debug['v'] > 2 {
+		fmt.Printf("new type: %v\n", gotype)
+	}
 
-func newtype(gotype *LSym) *DWDie {
-	name := gotype.Name[5:] // could also decode from Type.string
 	kind := decodetype_kind(gotype)
 	bytesize := decodetype_size(gotype)
 
-	var die *DWDie
 	switch kind {
 	case obj.KindBool:
-		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name)
 		newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_boolean, 0)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
@@ -871,7 +981,7 @@ func newtype(gotype *LSym) *DWDie {
 		obj.KindInt16,
 		obj.KindInt32,
 		obj.KindInt64:
-		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name)
 		newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_signed, 0)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
@@ -881,69 +991,66 @@ func newtype(gotype *LSym) *DWDie {
 		obj.KindUint32,
 		obj.KindUint64,
 		obj.KindUintptr:
-		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name)
 		newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_unsigned, 0)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
 	case obj.KindFloat32,
 		obj.KindFloat64:
-		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name)
 		newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_float, 0)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
 	case obj.KindComplex64,
 		obj.KindComplex128:
-		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BASETYPE, name)
 		newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_complex_float, 0)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
 	case obj.KindArray:
-		die = newdie(&dwtypes, DW_ABRV_ARRAYTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_ARRAYTYPE, name)
 		dotypedef(&dwtypes, name, die)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 		s := decodetype_arrayelem(gotype)
 		newrefattr(die, DW_AT_type, defgotype(s))
-		fld := newdie(die, DW_ABRV_ARRAYRANGE, "range", 0)
+		fld := newdie(die, DW_ABRV_ARRAYRANGE, "range")
 
 		// use actual length not upper bound; correct for 0-length arrays.
 		newattr(fld, DW_AT_count, DW_CLS_CONSTANT, decodetype_arraylen(gotype), 0)
 
-		newrefattr(fld, DW_AT_type, mustFind("uintptr"))
+		newrefattr(fld, DW_AT_type, mustFind(&dwtypes, "uintptr"))
 
 	case obj.KindChan:
-		die = newdie(&dwtypes, DW_ABRV_CHANTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_CHANTYPE, name)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 		s := decodetype_chanelem(gotype)
 		newrefattr(die, DW_AT_go_elem, defgotype(s))
-		// Save elem type for synthesizechantypes. We could synthesize here
-		// but that would change the order of DIEs we output.
-		newrefattr(die, DW_AT_type, s)
 
 	case obj.KindFunc:
-		die = newdie(&dwtypes, DW_ABRV_FUNCTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_FUNCTYPE, name)
 		dotypedef(&dwtypes, name, die)
-		newrefattr(die, DW_AT_type, mustFind("void"))
+		newrefattr(die, DW_AT_type, mustFind(&dwtypes, "void"))
 		nfields := decodetype_funcincount(gotype)
 		var fld *DWDie
 		var s *LSym
 		for i := 0; i < nfields; i++ {
 			s = decodetype_funcintype(gotype, i)
-			fld = newdie(die, DW_ABRV_FUNCTYPEPARAM, s.Name[5:], 0)
+			fld = newdie(die, DW_ABRV_FUNCTYPEPARAM, s.Name[5:])
 			newrefattr(fld, DW_AT_type, defgotype(s))
 		}
 
-		if decodetype_funcdotdotdot(gotype) {
-			newdie(die, DW_ABRV_DOTDOTDOT, "...", 0)
+		if decodetype_funcdotdotdot(gotype) != 0 {
+			newdie(die, DW_ABRV_DOTDOTDOT, "...")
 		}
 		nfields = decodetype_funcoutcount(gotype)
 		for i := 0; i < nfields; i++ {
 			s = decodetype_funcouttype(gotype, i)
-			fld = newdie(die, DW_ABRV_FUNCTYPEPARAM, s.Name[5:], 0)
+			fld = newdie(die, DW_ABRV_FUNCTYPEPARAM, s.Name[5:])
 			newrefattr(fld, DW_AT_type, defptrto(defgotype(s)))
 		}
 
 	case obj.KindInterface:
-		die = newdie(&dwtypes, DW_ABRV_IFACETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_IFACETYPE, name)
 		dotypedef(&dwtypes, name, die)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 		nfields := int(decodetype_ifacemethodcount(gotype))
@@ -956,35 +1063,31 @@ func newtype(gotype *LSym) *DWDie {
 		newrefattr(die, DW_AT_type, defgotype(s))
 
 	case obj.KindMap:
-		die = newdie(&dwtypes, DW_ABRV_MAPTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_MAPTYPE, name)
 		s := decodetype_mapkey(gotype)
 		newrefattr(die, DW_AT_go_key, defgotype(s))
 		s = decodetype_mapvalue(gotype)
 		newrefattr(die, DW_AT_go_elem, defgotype(s))
-		// Save gotype for use in synthesizemaptypes. We could synthesize here,
-		// but that would change the order of the DIEs.
-		newrefattr(die, DW_AT_type, gotype)
 
 	case obj.KindPtr:
-		die = newdie(&dwtypes, DW_ABRV_PTRTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_PTRTYPE, name)
 		dotypedef(&dwtypes, name, die)
 		s := decodetype_ptrelem(gotype)
 		newrefattr(die, DW_AT_type, defgotype(s))
 
 	case obj.KindSlice:
-		die = newdie(&dwtypes, DW_ABRV_SLICETYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_SLICETYPE, name)
 		dotypedef(&dwtypes, name, die)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 		s := decodetype_arrayelem(gotype)
-		elem := defgotype(s)
-		newrefattr(die, DW_AT_go_elem, elem)
+		newrefattr(die, DW_AT_go_elem, defgotype(s))
 
 	case obj.KindString:
-		die = newdie(&dwtypes, DW_ABRV_STRINGTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_STRINGTYPE, name)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 
 	case obj.KindStruct:
-		die = newdie(&dwtypes, DW_ABRV_STRUCTTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_STRUCTTYPE, name)
 		dotypedef(&dwtypes, name, die)
 		newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, bytesize, 0)
 		nfields := decodetype_structfieldcount(gotype)
@@ -997,55 +1100,46 @@ func newtype(gotype *LSym) *DWDie {
 			if f == "" {
 				f = s.Name[5:] // skip "type."
 			}
-			fld = newdie(die, DW_ABRV_STRUCTFIELD, f, 0)
+			fld = newdie(die, DW_ABRV_STRUCTFIELD, f)
 			newrefattr(fld, DW_AT_type, defgotype(s))
 			newmemberoffsetattr(fld, int32(decodetype_structfieldoffs(gotype, i)))
 		}
 
 	case obj.KindUnsafePointer:
-		die = newdie(&dwtypes, DW_ABRV_BARE_PTRTYPE, name, 0)
+		die = newdie(&dwtypes, DW_ABRV_BARE_PTRTYPE, name)
 
 	default:
 		Diag("dwarf: definition of unknown kind %d: %s", kind, gotype.Name)
-		die = newdie(&dwtypes, DW_ABRV_TYPEDECL, name, 0)
-		newrefattr(die, DW_AT_type, mustFind("<unspecified>"))
+		die = newdie(&dwtypes, DW_ABRV_TYPEDECL, name)
+		newrefattr(die, DW_AT_type, mustFind(&dwtypes, "<unspecified>"))
 	}
 
 	newattr(die, DW_AT_go_kind, DW_CLS_CONSTANT, int64(kind), 0)
 
-	if _, ok := prototypedies[gotype.Name]; ok {
-		prototypedies[gotype.Name] = die
-	}
-
 	return die
 }
 
-func nameFromDIESym(dwtype *LSym) string {
-	return strings.TrimSuffix(dwtype.Name[len(infoprefix):], ".def")
-}
-
 // Find or construct *T given T.
-func defptrto(dwtype *LSym) *LSym {
-	ptrname := "*" + nameFromDIESym(dwtype)
-	die := find(ptrname)
+func defptrto(dwtype *DWDie) *DWDie {
+	ptrname := fmt.Sprintf("*%s", getattr(dwtype, DW_AT_name).data)
+	die := find(&dwtypes, ptrname)
 	if die == nil {
-		pdie := newdie(&dwtypes, DW_ABRV_PTRTYPE, ptrname, 0)
-		newrefattr(pdie, DW_AT_type, dwtype)
-		return pdie.sym
+		die = newdie(&dwtypes, DW_ABRV_PTRTYPE, ptrname)
+		newrefattr(die, DW_AT_type, dwtype)
 	}
 
 	return die
 }
 
 // Copies src's children into dst. Copies attributes by value.
-// DWAttr.data is copied as pointer only. If except is one of
+// DWAttr.data is copied as pointer only.  If except is one of
 // the top-level children, it will not be copied.
 func copychildrenexcept(dst *DWDie, src *DWDie, except *DWDie) {
 	for src = src.child; src != nil; src = src.link {
 		if src == except {
 			continue
 		}
-		c := newdie(dst, src.abbrev, getattr(src, DW_AT_name).data.(string), 0)
+		c := newdie(dst, src.abbrev, getattr(src, DW_AT_name).data.(string))
 		for a := src.attr; a != nil; a = a.link {
 			newattr(c, a.atr, int(a.cls), a.value, a.data)
 		}
@@ -1061,11 +1155,9 @@ func copychildren(dst *DWDie, src *DWDie) {
 
 // Search children (assumed to have DW_TAG_member) for the one named
 // field and set its DW_AT_type to dwtype
-func substitutetype(structdie *DWDie, field string, dwtype *LSym) {
-	child := findchild(structdie, field)
+func substitutetype(structdie *DWDie, field string, dwtype *DWDie) {
+	child := mustFind(structdie, field)
 	if child == nil {
-		Exitf("dwarf substitutetype: %s does not have member %s",
-			getattr(structdie, DW_AT_name).data, field)
 		return
 	}
 
@@ -1077,17 +1169,8 @@ func substitutetype(structdie *DWDie, field string, dwtype *LSym) {
 	}
 }
 
-func findprotodie(name string) *DWDie {
-	die, ok := prototypedies[name]
-	if ok && die == nil {
-		defgotype(lookup_or_diag(name))
-		die = prototypedies[name]
-	}
-	return die
-}
-
 func synthesizestringtypes(die *DWDie) {
-	prototype := walktypedef(findprotodie("type.runtime.stringStructDWARF"))
+	prototype := walktypedef(defgotype(lookup_or_diag("type.runtime.stringStructDWARF")))
 	if prototype == nil {
 		return
 	}
@@ -1101,7 +1184,7 @@ func synthesizestringtypes(die *DWDie) {
 }
 
 func synthesizeslicetypes(die *DWDie) {
-	prototype := walktypedef(findprotodie("type.runtime.slice"))
+	prototype := walktypedef(defgotype(lookup_or_diag("type.runtime.slice")))
 	if prototype == nil {
 		return
 	}
@@ -1111,7 +1194,7 @@ func synthesizeslicetypes(die *DWDie) {
 			continue
 		}
 		copychildren(die, prototype)
-		elem := getattr(die, DW_AT_go_elem).data.(*LSym)
+		elem := getattr(die, DW_AT_go_elem).data.(*DWDie)
 		substitutetype(die, "array", defptrto(elem))
 	}
 }
@@ -1135,21 +1218,9 @@ const (
 	BucketSize = 8
 )
 
-func mkinternaltype(abbrev int, typename, keyname, valname string, f func(*DWDie)) *LSym {
-	name := mkinternaltypename(typename, keyname, valname)
-	symname := infoprefix + name
-	s := Linkrlookup(Ctxt, symname, 0)
-	if s != nil {
-		return s
-	}
-	die := newdie(&dwtypes, abbrev, name, 0)
-	f(die)
-	return die.sym
-}
-
 func synthesizemaptypes(die *DWDie) {
-	hash := walktypedef(findprotodie("type.runtime.hmap"))
-	bucket := walktypedef(findprotodie("type.runtime.bmap"))
+	hash := walktypedef(defgotype(lookup_or_diag("type.runtime.hmap")))
+	bucket := walktypedef(defgotype(lookup_or_diag("type.runtime.bmap")))
 
 	if hash == nil {
 		return
@@ -1159,92 +1230,97 @@ func synthesizemaptypes(die *DWDie) {
 		if die.abbrev != DW_ABRV_MAPTYPE {
 			continue
 		}
-		gotype := getattr(die, DW_AT_type).data.(*LSym)
-		keytype := decodetype_mapkey(gotype)
-		valtype := decodetype_mapvalue(gotype)
-		keysize, valsize := decodetype_size(keytype), decodetype_size(valtype)
-		keytype, valtype = walksymtypedef(defgotype(keytype)), walksymtypedef(defgotype(valtype))
+
+		keytype := walktypedef(getattr(die, DW_AT_go_key).data.(*DWDie))
+		valtype := walktypedef(getattr(die, DW_AT_go_elem).data.(*DWDie))
 
 		// compute size info like hashmap.c does.
+		keysize, valsize := Thearch.Ptrsize, Thearch.Ptrsize
+		a := getattr(keytype, DW_AT_byte_size)
+		if a != nil {
+			keysize = int(a.value)
+		}
+		a = getattr(valtype, DW_AT_byte_size)
+		if a != nil {
+			valsize = int(a.value)
+		}
 		indirect_key, indirect_val := false, false
 		if keysize > MaxKeySize {
-			keysize = int64(SysArch.PtrSize)
+			keysize = Thearch.Ptrsize
 			indirect_key = true
 		}
 		if valsize > MaxValSize {
-			valsize = int64(SysArch.PtrSize)
+			valsize = Thearch.Ptrsize
 			indirect_val = true
 		}
 
 		// Construct type to represent an array of BucketSize keys
-		keyname := nameFromDIESym(keytype)
-		dwhks := mkinternaltype(DW_ABRV_ARRAYTYPE, "[]key", keyname, "", func(dwhk *DWDie) {
-			newattr(dwhk, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*keysize, 0)
-			t := keytype
-			if indirect_key {
-				t = defptrto(keytype)
-			}
-			newrefattr(dwhk, DW_AT_type, t)
-			fld := newdie(dwhk, DW_ABRV_ARRAYRANGE, "size", 0)
-			newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
-			newrefattr(fld, DW_AT_type, mustFind("uintptr"))
-		})
+		dwhk := newdie(&dwtypes, DW_ABRV_ARRAYTYPE, mkinternaltypename("[]key", getattr(keytype, DW_AT_name).data.(string), ""))
+
+		newattr(dwhk, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(keysize), 0)
+		t := keytype
+		if indirect_key {
+			t = defptrto(keytype)
+		}
+		newrefattr(dwhk, DW_AT_type, t)
+		fld := newdie(dwhk, DW_ABRV_ARRAYRANGE, "size")
+		newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
+		newrefattr(fld, DW_AT_type, mustFind(&dwtypes, "uintptr"))
 
 		// Construct type to represent an array of BucketSize values
-		valname := nameFromDIESym(valtype)
-		dwhvs := mkinternaltype(DW_ABRV_ARRAYTYPE, "[]val", valname, "", func(dwhv *DWDie) {
-			newattr(dwhv, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*valsize, 0)
-			t := valtype
-			if indirect_val {
-				t = defptrto(valtype)
-			}
-			newrefattr(dwhv, DW_AT_type, t)
-			fld := newdie(dwhv, DW_ABRV_ARRAYRANGE, "size", 0)
-			newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
-			newrefattr(fld, DW_AT_type, mustFind("uintptr"))
-		})
+		dwhv := newdie(&dwtypes, DW_ABRV_ARRAYTYPE, mkinternaltypename("[]val", getattr(valtype, DW_AT_name).data.(string), ""))
+
+		newattr(dwhv, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize*int64(valsize), 0)
+		t = valtype
+		if indirect_val {
+			t = defptrto(valtype)
+		}
+		newrefattr(dwhv, DW_AT_type, t)
+		fld = newdie(dwhv, DW_ABRV_ARRAYRANGE, "size")
+		newattr(fld, DW_AT_count, DW_CLS_CONSTANT, BucketSize, 0)
+		newrefattr(fld, DW_AT_type, mustFind(&dwtypes, "uintptr"))
 
 		// Construct bucket<K,V>
-		dwhbs := mkinternaltype(DW_ABRV_STRUCTTYPE, "bucket", keyname, valname, func(dwhb *DWDie) {
-			// Copy over all fields except the field "data" from the generic
-			// bucket. "data" will be replaced with keys/values below.
-			copychildrenexcept(dwhb, bucket, findchild(bucket, "data"))
+		dwhb := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("bucket", getattr(keytype, DW_AT_name).data.(string), getattr(valtype, DW_AT_name).data.(string)))
 
-			fld := newdie(dwhb, DW_ABRV_STRUCTFIELD, "keys", 0)
-			newrefattr(fld, DW_AT_type, dwhks)
-			newmemberoffsetattr(fld, BucketSize)
-			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "values", 0)
-			newrefattr(fld, DW_AT_type, dwhvs)
-			newmemberoffsetattr(fld, BucketSize+BucketSize*int32(keysize))
-			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "overflow", 0)
-			newrefattr(fld, DW_AT_type, defptrto(dwhb.sym))
-			newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize)))
-			if SysArch.RegSize > SysArch.PtrSize {
-				fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "pad", 0)
-				newrefattr(fld, DW_AT_type, mustFind("uintptr"))
-				newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize))+int32(SysArch.PtrSize))
-			}
+		// Copy over all fields except the field "data" from the generic bucket.
+		// "data" will be replaced with keys/values below.
+		copychildrenexcept(dwhb, bucket, find(bucket, "data"))
 
-			newattr(dwhb, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize+BucketSize*keysize+BucketSize*valsize+int64(SysArch.RegSize), 0)
-		})
+		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "keys")
+		newrefattr(fld, DW_AT_type, dwhk)
+		newmemberoffsetattr(fld, BucketSize)
+		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "values")
+		newrefattr(fld, DW_AT_type, dwhv)
+		newmemberoffsetattr(fld, BucketSize+BucketSize*int32(keysize))
+		fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "overflow")
+		newrefattr(fld, DW_AT_type, defptrto(dwhb))
+		newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize)))
+		if Thearch.Regsize > Thearch.Ptrsize {
+			fld = newdie(dwhb, DW_ABRV_STRUCTFIELD, "pad")
+			newrefattr(fld, DW_AT_type, mustFind(&dwtypes, "uintptr"))
+			newmemberoffsetattr(fld, BucketSize+BucketSize*(int32(keysize)+int32(valsize))+int32(Thearch.Ptrsize))
+		}
+
+		newattr(dwhb, DW_AT_byte_size, DW_CLS_CONSTANT, BucketSize+BucketSize*int64(keysize)+BucketSize*int64(valsize)+int64(Thearch.Regsize), 0)
 
 		// Construct hash<K,V>
-		dwhs := mkinternaltype(DW_ABRV_STRUCTTYPE, "hash", keyname, valname, func(dwh *DWDie) {
-			copychildren(dwh, hash)
-			substitutetype(dwh, "buckets", defptrto(dwhbs))
-			substitutetype(dwh, "oldbuckets", defptrto(dwhbs))
-			newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hash, DW_AT_byte_size).value, nil)
-		})
+		dwh := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("hash", getattr(keytype, DW_AT_name).data.(string), getattr(valtype, DW_AT_name).data.(string)))
+
+		copychildren(dwh, hash)
+		substitutetype(dwh, "buckets", defptrto(dwhb))
+		substitutetype(dwh, "oldbuckets", defptrto(dwhb))
+		newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hash, DW_AT_byte_size).value, nil)
 
 		// make map type a pointer to hash<K,V>
-		newrefattr(die, DW_AT_type, defptrto(dwhs))
+		newrefattr(die, DW_AT_type, defptrto(dwh))
 	}
 }
 
 func synthesizechantypes(die *DWDie) {
-	sudog := walktypedef(findprotodie("type.runtime.sudog"))
-	waitq := walktypedef(findprotodie("type.runtime.waitq"))
-	hchan := walktypedef(findprotodie("type.runtime.hchan"))
+	sudog := walktypedef(defgotype(lookup_or_diag("type.runtime.sudog")))
+	waitq := walktypedef(defgotype(lookup_or_diag("type.runtime.waitq")))
+	hchan := walktypedef(defgotype(lookup_or_diag("type.runtime.hchan")))
 	if sudog == nil || waitq == nil || hchan == nil {
 		return
 	}
@@ -1255,41 +1331,42 @@ func synthesizechantypes(die *DWDie) {
 		if die.abbrev != DW_ABRV_CHANTYPE {
 			continue
 		}
-		elemgotype := getattr(die, DW_AT_type).data.(*LSym)
-		elemsize := decodetype_size(elemgotype)
-		elemname := elemgotype.Name[5:]
-		elemtype := walksymtypedef(defgotype(elemgotype))
+		elemsize := Thearch.Ptrsize
+		elemtype := getattr(die, DW_AT_go_elem).data.(*DWDie)
+		a := getattr(elemtype, DW_AT_byte_size)
+		if a != nil {
+			elemsize = int(a.value)
+		}
 
 		// sudog<T>
-		dwss := mkinternaltype(DW_ABRV_STRUCTTYPE, "sudog", elemname, "", func(dws *DWDie) {
-			copychildren(dws, sudog)
-			substitutetype(dws, "elem", elemtype)
-			if elemsize > 8 {
-				elemsize -= 8
-			} else {
-				elemsize = 0
-			}
-			newattr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize)+elemsize, nil)
-		})
+		dws := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("sudog", getattr(elemtype, DW_AT_name).data.(string), ""))
+
+		copychildren(dws, sudog)
+		substitutetype(dws, "elem", elemtype)
+		if elemsize > 8 {
+			elemsize -= 8
+		} else {
+			elemsize = 0
+		}
+		newattr(dws, DW_AT_byte_size, DW_CLS_CONSTANT, int64(sudogsize)+int64(elemsize), nil)
 
 		// waitq<T>
-		dwws := mkinternaltype(DW_ABRV_STRUCTTYPE, "waitq", elemname, "", func(dww *DWDie) {
+		dww := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("waitq", getattr(elemtype, DW_AT_name).data.(string), ""))
 
-			copychildren(dww, waitq)
-			substitutetype(dww, "first", defptrto(dwss))
-			substitutetype(dww, "last", defptrto(dwss))
-			newattr(dww, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(waitq, DW_AT_byte_size).value, nil)
-		})
+		copychildren(dww, waitq)
+		substitutetype(dww, "first", defptrto(dws))
+		substitutetype(dww, "last", defptrto(dws))
+		newattr(dww, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(waitq, DW_AT_byte_size).value, nil)
 
 		// hchan<T>
-		dwhs := mkinternaltype(DW_ABRV_STRUCTTYPE, "hchan", elemname, "", func(dwh *DWDie) {
-			copychildren(dwh, hchan)
-			substitutetype(dwh, "recvq", dwws)
-			substitutetype(dwh, "sendq", dwws)
-			newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hchan, DW_AT_byte_size).value, nil)
-		})
+		dwh := newdie(&dwtypes, DW_ABRV_STRUCTTYPE, mkinternaltypename("hchan", getattr(elemtype, DW_AT_name).data.(string), ""))
 
-		newrefattr(die, DW_AT_type, defptrto(dwhs))
+		copychildren(dwh, hchan)
+		substitutetype(dwh, "recvq", dww)
+		substitutetype(dwh, "sendq", dww)
+		newattr(dwh, DW_AT_byte_size, DW_CLS_CONSTANT, getattr(hchan, DW_AT_byte_size).value, nil)
+
+		newrefattr(die, DW_AT_type, defptrto(dwh))
 	}
 }
 
@@ -1309,13 +1386,13 @@ func defdwsymb(sym *LSym, s string, t int, v int64, size int64, ver int, gotype 
 
 	var dv *DWDie
 
-	var dt *LSym
+	var dt *DWDie
 	switch t {
 	default:
 		return
 
 	case 'd', 'b', 'D', 'B':
-		dv = newdie(&dwglobals, DW_ABRV_VARIABLE, s, ver)
+		dv = newdie(&dwglobals, DW_ABRV_VARIABLE, s)
 		newabslocexprattr(dv, v, sym)
 		if ver == 0 {
 			newattr(dv, DW_AT_external, DW_CLS_FLAG, 1, 0)
@@ -1345,8 +1422,8 @@ func finddebugruntimepath(s *LSym) {
 		return
 	}
 
-	for i := range s.FuncInfo.File {
-		f := s.FuncInfo.File[i]
+	for i := 0; i < s.Pcln.Nfile; i++ {
+		f := s.Pcln.File[i]
 		if i := strings.Index(f.Name, "runtime/runtime.go"); i >= 0 {
 			gdbscript = f.Name[:i] + "runtime/runtime-gdb.py"
 			break
@@ -1364,36 +1441,41 @@ const (
 	OPCODE_BASE = 10
 )
 
-func putpclcdelta(s *LSym, delta_pc int64, delta_lc int64) {
+func putpclcdelta(delta_pc int64, delta_lc int64) {
 	if LINE_BASE <= delta_lc && delta_lc < LINE_BASE+LINE_RANGE {
 		var opcode int64 = OPCODE_BASE + (delta_lc - LINE_BASE) + (LINE_RANGE * delta_pc)
 		if OPCODE_BASE <= opcode && opcode < 256 {
-			Adduint8(Ctxt, s, uint8(opcode))
+			Cput(uint8(opcode))
 			return
 		}
 	}
 
 	if delta_pc != 0 {
-		Adduint8(Ctxt, s, DW_LNS_advance_pc)
-		sleb128put(s, delta_pc)
+		Cput(DW_LNS_advance_pc)
+		sleb128put(delta_pc)
 	}
 
-	Adduint8(Ctxt, s, DW_LNS_advance_line)
-	sleb128put(s, delta_lc)
-	Adduint8(Ctxt, s, DW_LNS_copy)
+	Cput(DW_LNS_advance_line)
+	sleb128put(delta_lc)
+	Cput(DW_LNS_copy)
 }
 
 func newcfaoffsetattr(die *DWDie, offs int32) {
 	var block [20]byte
-	b := append(block[:0], DW_OP_call_frame_cfa)
 
+	i := 0
+
+	block[i] = DW_OP_call_frame_cfa
+	i++
 	if offs != 0 {
-		b = append(b, DW_OP_consts)
-		b = appendSleb128(b, int64(offs))
-		b = append(b, DW_OP_plus)
+		block[i] = DW_OP_consts
+		i++
+		i += sleb128enc(int64(offs), block[i:])
+		block[i] = DW_OP_plus
+		i++
 	}
 
-	newattr(die, DW_AT_location, DW_CLS_BLOCK, int64(len(b)), b)
+	newattr(die, DW_AT_location, DW_CLS_BLOCK, int64(i), block[:i])
 }
 
 func mkvarname(name string, da int) string {
@@ -1406,6 +1488,26 @@ func mkvarname(name string, da int) string {
  * Walk prog table, emit line program and build DIE tree.
  */
 
+// flush previous compilation unit.
+func flushunit(dwinfo *DWDie, pc int64, pcsym *LSym, unitstart int64, header_length int32) {
+	if dwinfo != nil && pc != 0 {
+		newattr(dwinfo, DW_AT_high_pc, DW_CLS_ADDRESS, pc+1, pcsym)
+	}
+
+	if unitstart >= 0 {
+		Cput(0) // start extended opcode
+		uleb128put(1)
+		Cput(DW_LNE_end_sequence)
+
+		here := Cpos()
+		Cseek(unitstart)
+		Thearch.Lput(uint32(here - unitstart - 4)) // unit_length
+		Thearch.Wput(2)                            // dwarf version
+		Thearch.Lput(uint32(header_length))        // header length starting here
+		Cseek(here)
+	}
+}
+
 func getCompilationDir() string {
 	if dir, err := os.Getwd(); err == nil {
 		return dir
@@ -1413,30 +1515,28 @@ func getCompilationDir() string {
 	return "/"
 }
 
-func writelines(prev *LSym) *LSym {
+func writelines() {
 	if linesec == nil {
-		linesec = Linklookup(Ctxt, ".debug_line", 0)
+		linesec = Linklookup(Ctxt, ".dwarfline", 0)
 	}
-	linesec.Type = obj.SDWARFSECT
 	linesec.R = linesec.R[:0]
 
-	ls := linesec
-	prev.Next = ls
-
 	unitstart := int64(-1)
-	headerstart := int64(-1)
 	headerend := int64(-1)
 	epc := int64(0)
 	var epcs *LSym
+	lineo = Cpos()
 	var dwinfo *DWDie
+	flushunit(dwinfo, epc, epcs, unitstart, int32(headerend-unitstart-10))
+	unitstart = Cpos()
 
 	lang := DW_LANG_Go
 
-	s := Ctxt.Textp[0]
+	s := Ctxt.Textp
 
-	dwinfo = newdie(&dwroot, DW_ABRV_COMPUNIT, "go", 0)
+	dwinfo = newdie(&dwroot, DW_ABRV_COMPUNIT, "go")
 	newattr(dwinfo, DW_AT_language, DW_CLS_CONSTANT, int64(lang), 0)
-	newattr(dwinfo, DW_AT_stmt_list, DW_CLS_PTR, 0, 0)
+	newattr(dwinfo, DW_AT_stmt_list, DW_CLS_PTR, unitstart-lineo, 0)
 	newattr(dwinfo, DW_AT_low_pc, DW_CLS_ADDRESS, s.Value, s)
 	// OS X linker requires compilation dir or absolute path in comp unit name to output debug info.
 	compDir := getCompilationDir()
@@ -1444,62 +1544,61 @@ func writelines(prev *LSym) *LSym {
 
 	// Write .debug_line Line Number Program Header (sec 6.2.4)
 	// Fields marked with (*) must be changed for 64-bit dwarf
-	unit_length_offset := ls.Size
-	Adduint32(Ctxt, ls, 0) // unit_length (*), filled in at end.
-	unitstart = ls.Size
-	Adduint16(Ctxt, ls, 2) // dwarf version (appendix F)
-	header_length_offset := ls.Size
-	Adduint32(Ctxt, ls, 0) // header_length (*), filled in at end.
-	headerstart = ls.Size
+	Thearch.Lput(0) // unit_length (*), will be filled in by flushunit.
+	Thearch.Wput(2) // dwarf version (appendix F)
+	Thearch.Lput(0) // header_length (*), filled in by flushunit.
 
 	// cpos == unitstart + 4 + 2 + 4
-	Adduint8(Ctxt, ls, 1)              // minimum_instruction_length
-	Adduint8(Ctxt, ls, 1)              // default_is_stmt
-	Adduint8(Ctxt, ls, LINE_BASE&0xFF) // line_base
-	Adduint8(Ctxt, ls, LINE_RANGE)     // line_range
-	Adduint8(Ctxt, ls, OPCODE_BASE)    // opcode_base
-	Adduint8(Ctxt, ls, 0)              // standard_opcode_lengths[1]
-	Adduint8(Ctxt, ls, 1)              // standard_opcode_lengths[2]
-	Adduint8(Ctxt, ls, 1)              // standard_opcode_lengths[3]
-	Adduint8(Ctxt, ls, 1)              // standard_opcode_lengths[4]
-	Adduint8(Ctxt, ls, 1)              // standard_opcode_lengths[5]
-	Adduint8(Ctxt, ls, 0)              // standard_opcode_lengths[6]
-	Adduint8(Ctxt, ls, 0)              // standard_opcode_lengths[7]
-	Adduint8(Ctxt, ls, 0)              // standard_opcode_lengths[8]
-	Adduint8(Ctxt, ls, 1)              // standard_opcode_lengths[9]
-	Adduint8(Ctxt, ls, 0)              // include_directories  (empty)
+	Cput(1)                // minimum_instruction_length
+	Cput(1)                // default_is_stmt
+	Cput(LINE_BASE & 0xFF) // line_base
+	Cput(LINE_RANGE)       // line_range
+	Cput(OPCODE_BASE)      // opcode_base
+	Cput(0)                // standard_opcode_lengths[1]
+	Cput(1)                // standard_opcode_lengths[2]
+	Cput(1)                // standard_opcode_lengths[3]
+	Cput(1)                // standard_opcode_lengths[4]
+	Cput(1)                // standard_opcode_lengths[5]
+	Cput(0)                // standard_opcode_lengths[6]
+	Cput(0)                // standard_opcode_lengths[7]
+	Cput(0)                // standard_opcode_lengths[8]
+	Cput(1)                // standard_opcode_lengths[9]
+	Cput(0)                // include_directories  (empty)
 
-	for _, f := range Ctxt.Filesyms {
-		Addstring(ls, f.Name)
-		Adduint8(Ctxt, ls, 0)
-		Adduint8(Ctxt, ls, 0)
-		Adduint8(Ctxt, ls, 0)
+	files := make([]*LSym, Ctxt.Nhistfile)
+
+	for f := Ctxt.Filesyms; f != nil; f = f.Next {
+		files[f.Value-1] = f
+	}
+
+	for i := 0; int32(i) < Ctxt.Nhistfile; i++ {
+		strnput(files[i].Name, len(files[i].Name)+4)
 	}
 
 	// 4 zeros: the string termination + 3 fields.
-	Adduint8(Ctxt, ls, 0)
+	Cput(0)
 	// terminate file_names.
-	headerend = ls.Size
+	headerend = Cpos()
 
-	Adduint8(Ctxt, ls, 0) // start extended opcode
-	uleb128put(ls, 1+int64(SysArch.PtrSize))
-	Adduint8(Ctxt, ls, DW_LNE_set_address)
+	Cput(0) // start extended opcode
+	uleb128put(1 + int64(Thearch.Ptrsize))
+	Cput(DW_LNE_set_address)
 
 	pc := s.Value
 	line := 1
 	file := 1
 	if Linkmode == LinkExternal {
-		Addaddr(Ctxt, ls, s)
+		adddwarfrel(linesec, s, lineo, Thearch.Ptrsize, 0)
 	} else {
-		addrput(ls, pc)
+		addrput(pc)
 	}
 
 	var pcfile Pciter
 	var pcline Pciter
-	for _, Ctxt.Cursym = range Ctxt.Textp {
-		s := Ctxt.Cursym
+	for Ctxt.Cursym = Ctxt.Textp; Ctxt.Cursym != nil; Ctxt.Cursym = Ctxt.Cursym.Next {
+		s = Ctxt.Cursym
 
-		dwfunc := newdie(dwinfo, DW_ABRV_FUNCTION, s.Name, int(s.Version))
+		dwfunc := newdie(dwinfo, DW_ABRV_FUNCTION, s.Name)
 		newattr(dwfunc, DW_AT_low_pc, DW_CLS_ADDRESS, s.Value, s)
 		epc = s.Value + s.Size
 		epcs = s
@@ -1508,14 +1607,14 @@ func writelines(prev *LSym) *LSym {
 			newattr(dwfunc, DW_AT_external, DW_CLS_FLAG, 1, 0)
 		}
 
-		if s.FuncInfo == nil {
+		if s.Pcln == nil {
 			continue
 		}
 
 		finddebugruntimepath(s)
 
-		pciterinit(Ctxt, &pcfile, &s.FuncInfo.Pcfile)
-		pciterinit(Ctxt, &pcline, &s.FuncInfo.Pcline)
+		pciterinit(Ctxt, &pcfile, &s.Pcln.Pcfile)
+		pciterinit(Ctxt, &pcline, &s.Pcln.Pcline)
 		epc = pc
 		for pcfile.done == 0 && pcline.done == 0 {
 			if epc-s.Value >= int64(pcfile.nextpc) {
@@ -1529,12 +1628,12 @@ func writelines(prev *LSym) *LSym {
 			}
 
 			if int32(file) != pcfile.value {
-				Adduint8(Ctxt, ls, DW_LNS_set_file)
-				uleb128put(ls, int64(pcfile.value))
+				Cput(DW_LNS_set_file)
+				uleb128put(int64(pcfile.value))
 				file = int(pcfile.value)
 			}
 
-			putpclcdelta(ls, s.Value+int64(pcline.pc)-pc, int64(pcline.value)-int64(line))
+			putpclcdelta(s.Value+int64(pcline.pc)-pc, int64(pcline.value)-int64(line))
 
 			pc = s.Value + int64(pcline.pc)
 			line = int(pcline.value)
@@ -1547,22 +1646,19 @@ func writelines(prev *LSym) *LSym {
 		}
 
 		var (
-			dt, da int
-			offs   int64
+			dt      int
+			offs    int64
+			varhash [HASHSIZE]*DWDie
 		)
-		for _, a := range s.FuncInfo.Autom {
+		da := 0
+		dwfunc.hash = varhash[:] // enable indexing of children by name
+		for a := s.Autom; a != nil; a = a.Link {
 			switch a.Name {
 			case obj.A_AUTO:
 				dt = DW_ABRV_AUTO
 				offs = int64(a.Aoffset)
 				if !haslinkregister() {
-					offs -= int64(SysArch.PtrSize)
-				}
-				if obj.Framepointer_enabled(obj.Getgoos(), obj.Getgoarch()) {
-					// The frame pointer is saved
-					// between the CFA and the
-					// autos.
-					offs -= int64(SysArch.PtrSize)
+					offs -= int64(Thearch.Ptrsize)
 				}
 
 			case obj.A_PARAM:
@@ -1577,7 +1673,7 @@ func writelines(prev *LSym) *LSym {
 				continue
 			}
 			var n string
-			if findchild(dwfunc, a.Asym.Name) != nil {
+			if find(dwfunc, a.Asym.Name) != nil {
 				n = mkvarname(a.Asym.Name, da)
 			} else {
 				n = a.Asym.Name
@@ -1588,7 +1684,7 @@ func writelines(prev *LSym) *LSym {
 				n = n[i+1:]
 			}
 
-			dwvar := newdie(dwfunc, dt, n, 0)
+			dwvar := newdie(dwfunc, dt, n)
 			newcfaoffsetattr(dwvar, int32(offs))
 			newrefattr(dwvar, DW_AT_type, defgotype(a.Gotype))
 
@@ -1607,110 +1703,98 @@ func writelines(prev *LSym) *LSym {
 
 			da++
 		}
+
+		dwfunc.hash = nil
 	}
 
-	Adduint8(Ctxt, ls, 0) // start extended opcode
-	uleb128put(ls, 1)
-	Adduint8(Ctxt, ls, DW_LNE_end_sequence)
-
-	newattr(dwinfo, DW_AT_high_pc, DW_CLS_ADDRESS, epc+1, epcs)
-
-	setuint32(Ctxt, ls, unit_length_offset, uint32(ls.Size-unitstart))
-	setuint32(Ctxt, ls, header_length_offset, uint32(headerend-headerstart))
-
-	return ls
+	flushunit(dwinfo, epc, epcs, unitstart, int32(headerend-unitstart-10))
+	linesize = Cpos() - lineo
 }
 
 /*
  *  Emit .debug_frame
  */
 const (
-	dataAlignmentFactor = -4
+	CIERESERVE          = 16
+	DATAALIGNMENTFACTOR = -4
 )
 
-// appendPCDeltaCFA appends per-PC CFA deltas to b and returns the final slice.
-func appendPCDeltaCFA(b []byte, deltapc, cfa int64) []byte {
-	b = append(b, DW_CFA_def_cfa_offset_sf)
-	b = appendSleb128(b, cfa/dataAlignmentFactor)
+func putpccfadelta(deltapc int64, cfa int64) {
+	Cput(DW_CFA_def_cfa_offset_sf)
+	sleb128put(cfa / DATAALIGNMENTFACTOR)
 
-	switch {
-	case deltapc < 0x40:
-		b = append(b, uint8(DW_CFA_advance_loc+deltapc))
-	case deltapc < 0x100:
-		b = append(b, DW_CFA_advance_loc1)
-		b = append(b, uint8(deltapc))
-	case deltapc < 0x10000:
-		b = append(b, DW_CFA_advance_loc2)
-		b = Thearch.Append16(b, uint16(deltapc))
-	default:
-		b = append(b, DW_CFA_advance_loc4)
-		b = Thearch.Append32(b, uint32(deltapc))
+	if deltapc < 0x40 {
+		Cput(uint8(DW_CFA_advance_loc + deltapc))
+	} else if deltapc < 0x100 {
+		Cput(DW_CFA_advance_loc1)
+		Cput(uint8(deltapc))
+	} else if deltapc < 0x10000 {
+		Cput(DW_CFA_advance_loc2)
+		Thearch.Wput(uint16(deltapc))
+	} else {
+		Cput(DW_CFA_advance_loc4)
+		Thearch.Lput(uint32(deltapc))
 	}
-	return b
 }
 
-func writeframes(prev *LSym) *LSym {
+func writeframes() {
 	if framesec == nil {
-		framesec = Linklookup(Ctxt, ".debug_frame", 0)
+		framesec = Linklookup(Ctxt, ".dwarfframe", 0)
 	}
-	framesec.Type = obj.SDWARFSECT
 	framesec.R = framesec.R[:0]
-	fs := framesec
-	prev.Next = fs
+	frameo = Cpos()
 
 	// Emit the CIE, Section 6.4.1
-	cieReserve := uint32(16)
+	Thearch.Lput(CIERESERVE)              // initial length, must be multiple of thearch.ptrsize
+	Thearch.Lput(0xffffffff)              // cid.
+	Cput(3)                               // dwarf version (appendix F)
+	Cput(0)                               // augmentation ""
+	uleb128put(1)                         // code_alignment_factor
+	sleb128put(DATAALIGNMENTFACTOR)       // guess
+	uleb128put(int64(Thearch.Dwarfreglr)) // return_address_register
+
+	Cput(DW_CFA_def_cfa)
+
+	uleb128put(int64(Thearch.Dwarfregsp)) // register SP (**ABI-dependent, defined in l.h)
 	if haslinkregister() {
-		cieReserve = 32
-	}
-	Adduint32(Ctxt, fs, cieReserve)           // initial length, must be multiple of pointer size
-	Adduint32(Ctxt, fs, 0xffffffff)           // cid.
-	Adduint8(Ctxt, fs, 3)                     // dwarf version (appendix F)
-	Adduint8(Ctxt, fs, 0)                     // augmentation ""
-	uleb128put(fs, 1)                         // code_alignment_factor
-	sleb128put(fs, dataAlignmentFactor)       // all CFI offset calculations include multiplication with this factor
-	uleb128put(fs, int64(Thearch.Dwarfreglr)) // return_address_register
-
-	Adduint8(Ctxt, fs, DW_CFA_def_cfa)        // Set the current frame address..
-	uleb128put(fs, int64(Thearch.Dwarfregsp)) // ...to use the value in the platform's SP register (defined in l.go)...
-	if haslinkregister() {
-		uleb128put(fs, int64(0)) // ...plus a 0 offset.
-
-		Adduint8(Ctxt, fs, DW_CFA_same_value) // The platform's link register is unchanged during the prologue.
-		uleb128put(fs, int64(Thearch.Dwarfreglr))
-
-		Adduint8(Ctxt, fs, DW_CFA_val_offset)     // The previous value...
-		uleb128put(fs, int64(Thearch.Dwarfregsp)) // ...of the platform's SP register...
-		uleb128put(fs, int64(0))                  // ...is CFA+0.
+		uleb128put(int64(0)) // offset
 	} else {
-		uleb128put(fs, int64(SysArch.PtrSize)) // ...plus the word size (because the call instruction implicitly adds one word to the frame).
+		uleb128put(int64(Thearch.Ptrsize)) // offset
+	}
 
-		Adduint8(Ctxt, fs, DW_CFA_offset_extended)                  // The previous value...
-		uleb128put(fs, int64(Thearch.Dwarfreglr))                   // ...of the return address...
-		uleb128put(fs, int64(-SysArch.PtrSize)/dataAlignmentFactor) // ...is saved at [CFA - (PtrSize/4)].
+	Cput(DW_CFA_offset_extended)
+	uleb128put(int64(Thearch.Dwarfreglr)) // return address
+	if haslinkregister() {
+		uleb128put(int64(0) / DATAALIGNMENTFACTOR) // at cfa - 0
+	} else {
+		uleb128put(int64(-Thearch.Ptrsize) / DATAALIGNMENTFACTOR) // at cfa - x*4
 	}
 
 	// 4 is to exclude the length field.
-	pad := int64(cieReserve) + 4 - fs.Size
+	pad := CIERESERVE + frameo + 4 - Cpos()
 
 	if pad < 0 {
-		Exitf("dwarf: cieReserve too small by %d bytes.", -pad)
+		Exitf("dwarf: CIERESERVE too small by %d bytes.", -pad)
 	}
 
-	Addbytes(Ctxt, fs, zeros[:pad])
+	strnput("", int(pad))
 
-	var deltaBuf []byte
 	var pcsp Pciter
-	for _, Ctxt.Cursym = range Ctxt.Textp {
+	for Ctxt.Cursym = Ctxt.Textp; Ctxt.Cursym != nil; Ctxt.Cursym = Ctxt.Cursym.Next {
 		s := Ctxt.Cursym
-		if s.FuncInfo == nil {
+		if s.Pcln == nil {
 			continue
 		}
 
-		// Emit a FDE, Section 6.4.1.
-		// First build the section contents into a byte buffer.
-		deltaBuf = deltaBuf[:0]
-		for pciterinit(Ctxt, &pcsp, &s.FuncInfo.Pcsp); pcsp.done == 0; pciternext(&pcsp) {
+		fdeo := Cpos()
+
+		// Emit a FDE, Section 6.4.1, starting wit a placeholder.
+		Thearch.Lput(0) // length, must be multiple of thearch.ptrsize
+		Thearch.Lput(0) // Pointer to the CIE above, at offset 0
+		addrput(0)      // initial location
+		addrput(0)      // address range
+
+		for pciterinit(Ctxt, &pcsp, &s.Pcln.Pcsp); pcsp.done == 0; pciternext(&pcsp) {
 			nextpc := pcsp.nextpc
 
 			// pciterinit goes up to the end of the function,
@@ -1723,45 +1807,35 @@ func writeframes(prev *LSym) *LSym {
 			}
 
 			if haslinkregister() {
-				// TODO(bryanpkc): This is imprecise. In general, the instruction
-				// that stores the return address to the stack frame is not the
-				// same one that allocates the frame.
-				if pcsp.value > 0 {
-					// The return address is preserved at (CFA-frame_size)
-					// after a stack frame has been allocated.
-					deltaBuf = append(deltaBuf, DW_CFA_offset_extended_sf)
-					deltaBuf = appendUleb128(deltaBuf, uint64(Thearch.Dwarfreglr))
-					deltaBuf = appendSleb128(deltaBuf, -int64(pcsp.value)/dataAlignmentFactor)
-				} else {
-					// The return address is restored into the link register
-					// when a stack frame has been de-allocated.
-					deltaBuf = append(deltaBuf, DW_CFA_same_value)
-					deltaBuf = appendUleb128(deltaBuf, uint64(Thearch.Dwarfreglr))
-				}
-				deltaBuf = appendPCDeltaCFA(deltaBuf, int64(nextpc)-int64(pcsp.pc), int64(pcsp.value))
+				putpccfadelta(int64(nextpc)-int64(pcsp.pc), int64(pcsp.value))
 			} else {
-				deltaBuf = appendPCDeltaCFA(deltaBuf, int64(nextpc)-int64(pcsp.pc), int64(SysArch.PtrSize)+int64(pcsp.value))
+				putpccfadelta(int64(nextpc)-int64(pcsp.pc), int64(Thearch.Ptrsize)+int64(pcsp.value))
 			}
 		}
-		pad := int(Rnd(int64(len(deltaBuf)), int64(SysArch.PtrSize))) - len(deltaBuf)
-		deltaBuf = append(deltaBuf, zeros[:pad]...)
 
-		// Emit the FDE header, Section 6.4.1.
-		//	4 bytes: length, must be multiple of thearch.ptrsize
-		//	4 bytes: Pointer to the CIE above, at offset 0
-		//	ptrsize: initial location
-		//	ptrsize: address range
-		Adduint32(Ctxt, fs, uint32(4+2*SysArch.PtrSize+len(deltaBuf))) // length (excludes itself)
+		fdesize := Cpos() - fdeo - 4 // exclude the length field.
+		pad = Rnd(fdesize, int64(Thearch.Ptrsize)) - fdesize
+		strnput("", int(pad))
+		fdesize += pad
+
+		// Emit the FDE header for real, Section 6.4.1.
+		Cseek(fdeo)
+
+		Thearch.Lput(uint32(fdesize))
 		if Linkmode == LinkExternal {
-			adddwarfref(Ctxt, fs, framesec, 4)
+			adddwarfrel(framesec, framesym, frameo, 4, 0)
+			adddwarfrel(framesec, s, frameo, Thearch.Ptrsize, 0)
 		} else {
-			Adduint32(Ctxt, fs, 0) // CIE offset
+			Thearch.Lput(0)
+			addrput(s.Value)
 		}
-		Addaddr(Ctxt, fs, s)
-		addrput(fs, s.Size) // address range
-		Addbytes(Ctxt, fs, deltaBuf)
+
+		addrput(s.Size)
+		Cseek(fdeo + 4 + fdesize)
 	}
-	return fs
+
+	Cflush()
+	framesize = Cpos() - frameo
 }
 
 /*
@@ -1771,14 +1845,12 @@ const (
 	COMPUNITHEADERSIZE = 4 + 2 + 4 + 1
 )
 
-func writeinfo(prev *LSym) *LSym {
+func writeinfo() {
+	fwdcount = 0
 	if infosec == nil {
-		infosec = Linklookup(Ctxt, ".debug_info", 0)
+		infosec = Linklookup(Ctxt, ".dwarfinfo", 0)
 	}
 	infosec.R = infosec.R[:0]
-	infosec.Type = obj.SDWARFINFO
-	infosec.Attr |= AttrReachable
-	prev.Next, prev = infosec, infosec
 
 	if arangessec == nil {
 		arangessec = Linklookup(Ctxt, ".dwarfaranges", 0)
@@ -1786,30 +1858,32 @@ func writeinfo(prev *LSym) *LSym {
 	arangessec.R = arangessec.R[:0]
 
 	for compunit := dwroot.child; compunit != nil; compunit = compunit.link {
-		s := compunit.sym
-		prev.Next, prev = s, s
+		unitstart := Cpos()
 
 		// Write .debug_info Compilation Unit Header (sec 7.5.1)
 		// Fields marked with (*) must be changed for 64-bit dwarf
 		// This must match COMPUNITHEADERSIZE above.
-		Adduint32(Ctxt, s, 0) // unit_length (*), will be filled in later.
-		Adduint16(Ctxt, s, 2) // dwarf version (appendix F)
+		Thearch.Lput(0) // unit_length (*), will be filled in later.
+		Thearch.Wput(2) // dwarf version (appendix F)
 
 		// debug_abbrev_offset (*)
-		adddwarfref(Ctxt, s, abbrevsym, 4)
-
-		Adduint8(Ctxt, s, uint8(SysArch.PtrSize)) // address_size
-
-		prev = putdie(prev, compunit)
-		cusize := s.Size - 4 // exclude the length field.
-		for child := s.Next; child != nil; child = child.Next {
-			cusize += child.Size
+		if Linkmode == LinkExternal {
+			adddwarfrel(infosec, abbrevsym, infoo, 4, 0)
+		} else {
+			Thearch.Lput(0)
 		}
 
-		setuint32(Ctxt, s, 0, uint32(cusize))
-		newattr(compunit, DW_AT_byte_size, DW_CLS_CONSTANT, cusize, 0)
+		Cput(uint8(Thearch.Ptrsize)) // address_size
+
+		putdie(compunit)
+
+		here := Cpos()
+		Cseek(unitstart)
+		Thearch.Lput(uint32(here - unitstart - 4)) // exclude the length field.
+		Cseek(here)
 	}
-	return prev
+
+	Cflush()
 }
 
 /*
@@ -1830,52 +1904,51 @@ func ispubtype(die *DWDie) bool {
 	return die.abbrev >= DW_ABRV_NULLTYPE
 }
 
-func writepub(sname string, ispub func(*DWDie) bool, prev *LSym) *LSym {
-	s := Linklookup(Ctxt, sname, 0)
-	s.Type = obj.SDWARFSECT
-	prev.Next = s
+func writepub(ispub func(*DWDie) bool) int64 {
+	sectionstart := Cpos()
 
 	for compunit := dwroot.child; compunit != nil; compunit = compunit.link {
-		sectionstart := s.Size
-		culength := uint32(getattr(compunit, DW_AT_byte_size).value) + 4
+		unitend := infoo + infosize
+		unitstart := compunit.offs - COMPUNITHEADERSIZE
+		if compunit.link != nil {
+			unitend = compunit.link.offs - COMPUNITHEADERSIZE
+		}
 
 		// Write .debug_pubnames/types	Header (sec 6.1.1)
-		Adduint32(Ctxt, s, 0)                 // unit_length (*), will be filled in later.
-		Adduint16(Ctxt, s, 2)                 // dwarf version (appendix F)
-		adddwarfref(Ctxt, s, compunit.sym, 4) // debug_info_offset (of the Comp unit Header)
-		Adduint32(Ctxt, s, culength)          // debug_info_length
+		Thearch.Lput(0)                           // unit_length (*), will be filled in later.
+		Thearch.Wput(2)                           // dwarf version (appendix F)
+		Thearch.Lput(uint32(unitstart))           // debug_info_offset (of the Comp unit Header)
+		Thearch.Lput(uint32(unitend - unitstart)) // debug_info_length
 
 		for die := compunit.child; die != nil; die = die.link {
 			if !ispub(die) {
 				continue
 			}
+			Thearch.Lput(uint32(die.offs - unitstart))
 			dwa := getattr(die, DW_AT_name)
-			name := dwa.data.(string)
-			if die.sym == nil {
-				fmt.Println("Missing sym for ", name)
-			}
-			adddwarfref(Ctxt, s, die.sym, 4)
-			Addstring(s, name)
+			strnput(dwa.data.(string), int(dwa.value+1))
 		}
 
-		Adduint32(Ctxt, s, 0)
+		Thearch.Lput(0)
 
-		setuint32(Ctxt, s, sectionstart, uint32(s.Size-sectionstart)-4) // exclude the length field.
+		here := Cpos()
+		Cseek(sectionstart)
+		Thearch.Lput(uint32(here - sectionstart - 4)) // exclude the length field.
+		Cseek(here)
 	}
 
-	return s
+	return sectionstart
 }
 
 /*
  *  emit .debug_aranges.  _info must have been written before,
  *  because we need die->offs of dw_globals.
  */
-func writearanges(prev *LSym) *LSym {
-	s := Linklookup(Ctxt, ".debug_aranges", 0)
-	s.Type = obj.SDWARFSECT
+func writearanges() int64 {
+	sectionstart := Cpos()
 	// The first tuple is aligned to a multiple of the size of a single tuple
 	// (twice the size of an address)
-	headersize := int(Rnd(4+2+4+1+1, int64(SysArch.PtrSize*2))) // don't count unit_length field itself
+	headersize := int(Rnd(4+2+4+1+1, int64(Thearch.Ptrsize*2))) // don't count unit_length field itself
 
 	for compunit := dwroot.child; compunit != nil; compunit = compunit.link {
 		b := getattr(compunit, DW_AT_low_pc)
@@ -1888,46 +1961,78 @@ func writearanges(prev *LSym) *LSym {
 		}
 
 		// Write .debug_aranges	 Header + entry	 (sec 6.1.2)
-		unitlength := uint32(headersize) + 4*uint32(SysArch.PtrSize) - 4
-		Adduint32(Ctxt, s, unitlength) // unit_length (*)
-		Adduint16(Ctxt, s, 2)          // dwarf version (appendix F)
+		Thearch.Lput(uint32(headersize) + 4*uint32(Thearch.Ptrsize) - 4) // unit_length (*)
+		Thearch.Wput(2)                                                  // dwarf version (appendix F)
 
-		adddwarfref(Ctxt, s, compunit.sym, 4)
-
-		Adduint8(Ctxt, s, uint8(SysArch.PtrSize)) // address_size
-		Adduint8(Ctxt, s, 0)                      // segment_size
-		padding := headersize - (4 + 2 + 4 + 1 + 1)
-		for i := 0; i < padding; i++ {
-			Adduint8(Ctxt, s, 0)
+		value := compunit.offs - COMPUNITHEADERSIZE // debug_info_offset
+		if Linkmode == LinkExternal {
+			adddwarfrel(arangessec, infosym, sectionstart, 4, value)
+		} else {
+			Thearch.Lput(uint32(value))
 		}
 
-		Addaddrplus(Ctxt, s, b.data.(*LSym), b.value-(b.data.(*LSym)).Value)
-		addrput(s, e.value-b.value)
-		addrput(s, 0)
-		addrput(s, 0)
+		Cput(uint8(Thearch.Ptrsize))        // address_size
+		Cput(0)                             // segment_size
+		strnput("", headersize-(4+2+4+1+1)) // align to thearch.ptrsize
+
+		if Linkmode == LinkExternal {
+			adddwarfrel(arangessec, b.data.(*LSym), sectionstart, Thearch.Ptrsize, b.value-(b.data.(*LSym)).Value)
+		} else {
+			addrput(b.value)
+		}
+
+		addrput(e.value - b.value)
+		addrput(0)
+		addrput(0)
 	}
-	if s.Size > 0 {
-		prev.Next = s
-		prev = s
-	}
-	return prev
+
+	Cflush()
+	return sectionstart
 }
 
-func writegdbscript(prev *LSym) *LSym {
+func writegdbscript() int64 {
+	sectionstart := Cpos()
 
 	if gdbscript != "" {
-		s := Linklookup(Ctxt, ".debug_gdb_scripts", 0)
-		s.Type = obj.SDWARFSECT
-		prev.Next = s
-		prev = s
-		Adduint8(Ctxt, s, 1) // magic 1 byte?
-		Addstring(s, gdbscript)
+		Cput(1) // magic 1 byte?
+		strnput(gdbscript, len(gdbscript)+1)
+		Cflush()
 	}
 
-	return prev
+	return sectionstart
 }
 
-var prototypedies map[string]*DWDie
+func align(size int64) {
+	if HEADTYPE == obj.Hwindows { // Only Windows PE need section align.
+		strnput("", int(Rnd(size, PEFILEALIGN)-size))
+	}
+}
+
+func writedwarfreloc(s *LSym) int64 {
+	start := Cpos()
+	for ri := 0; ri < len(s.R); ri++ {
+		r := &s.R[ri]
+		i := -1
+		if Iself {
+			i = Thearch.Elfreloc1(r, int64(r.Off))
+		} else if HEADTYPE == obj.Hdarwin {
+			i = Thearch.Machoreloc1(r, int64(r.Off))
+		}
+		if i < 0 {
+			Diag("unsupported obj reloc %d/%d to %s", r.Type, r.Siz, r.Sym.Name)
+		}
+	}
+
+	return start
+}
+
+func addmachodwarfsect(prev *Section, name string) *Section {
+	sect := addsection(&Segdwarf, name, 04)
+	sect.Extnum = prev.Extnum + 1
+	sym := Linklookup(Ctxt, name, 0)
+	sym.Sect = sect
+	return sect
+}
 
 /*
  * This is the main entry point for generating dwarf.  After emitting
@@ -1938,14 +2043,8 @@ var prototypedies map[string]*DWDie
  * passes.
  *
  */
-func dwarfgeneratedebugsyms() {
+func Dwarfemitdebugsections() {
 	if Debug['w'] != 0 { // disable dwarf
-		return
-	}
-	if Debug['s'] != 0 && HEADTYPE != obj.Hdarwin {
-		return
-	}
-	if HEADTYPE == obj.Hplan9 {
 		return
 	}
 
@@ -1953,36 +2052,48 @@ func dwarfgeneratedebugsyms() {
 		if !Iself && HEADTYPE != obj.Hdarwin {
 			return
 		}
-	}
+		if HEADTYPE == obj.Hdarwin {
+			sect := Segdata.Sect
+			// find the last section.
+			for sect.Next != nil {
+				sect = sect.Next
+			}
+			sect = addmachodwarfsect(sect, ".debug_abbrev")
+			sect = addmachodwarfsect(sect, ".debug_line")
+			sect = addmachodwarfsect(sect, ".debug_frame")
+			sect = addmachodwarfsect(sect, ".debug_info")
 
-	if Debug['v'] != 0 {
-		fmt.Fprintf(Bso, "%5.2f dwarf\n", obj.Cputime())
+			infosym = Linklookup(Ctxt, ".debug_info", 0)
+			infosym.Hide = 1
+
+			abbrevsym = Linklookup(Ctxt, ".debug_abbrev", 0)
+			abbrevsym.Hide = 1
+
+			linesym = Linklookup(Ctxt, ".debug_line", 0)
+			linesym.Hide = 1
+
+			framesym = Linklookup(Ctxt, ".debug_frame", 0)
+			framesym.Hide = 1
+		}
 	}
 
 	// For diagnostic messages.
 	newattr(&dwtypes, DW_AT_name, DW_CLS_STRING, int64(len("dwtypes")), "dwtypes")
 
+	mkindex(&dwroot)
+	mkindex(&dwtypes)
+	mkindex(&dwglobals)
+
 	// Some types that must exist to define other ones.
-	newdie(&dwtypes, DW_ABRV_NULLTYPE, "<unspecified>", 0)
+	newdie(&dwtypes, DW_ABRV_NULLTYPE, "<unspecified>")
 
-	newdie(&dwtypes, DW_ABRV_NULLTYPE, "void", 0)
-	newdie(&dwtypes, DW_ABRV_BARE_PTRTYPE, "unsafe.Pointer", 0)
+	newdie(&dwtypes, DW_ABRV_NULLTYPE, "void")
+	newdie(&dwtypes, DW_ABRV_BARE_PTRTYPE, "unsafe.Pointer")
 
-	die := newdie(&dwtypes, DW_ABRV_BASETYPE, "uintptr", 0) // needed for array size
+	die := newdie(&dwtypes, DW_ABRV_BASETYPE, "uintptr") // needed for array size
 	newattr(die, DW_AT_encoding, DW_CLS_CONSTANT, DW_ATE_unsigned, 0)
-	newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, int64(SysArch.PtrSize), 0)
+	newattr(die, DW_AT_byte_size, DW_CLS_CONSTANT, int64(Thearch.Ptrsize), 0)
 	newattr(die, DW_AT_go_kind, DW_CLS_CONSTANT, obj.KindUintptr, 0)
-
-	// Prototypes needed for type synthesis.
-	prototypedies = map[string]*DWDie{
-		"type.runtime.stringStructDWARF": nil,
-		"type.runtime.slice":             nil,
-		"type.runtime.hmap":              nil,
-		"type.runtime.bmap":              nil,
-		"type.runtime.sudog":             nil,
-		"type.runtime.waitq":             nil,
-		"type.runtime.hchan":             nil,
-	}
 
 	// Needed by the prettyprinter code for interface inspection.
 	defgotype(lookup_or_diag("type.runtime._type"))
@@ -1992,10 +2103,12 @@ func dwarfgeneratedebugsyms() {
 
 	genasmsym(defdwsymb)
 
-	dwarfp = writeabbrev()
-	last := dwarfp
-	last = writelines(last)
-	last = writeframes(last)
+	writeabbrev()
+	align(abbrevsize)
+	writelines()
+	align(linesize)
+	writeframes()
+	align(framesize)
 
 	synthesizestringtypes(dwtypes.child)
 	synthesizeslicetypes(dwtypes.child)
@@ -2009,61 +2122,412 @@ func dwarfgeneratedebugsyms() {
 	movetomodule(&dwtypes)
 	movetomodule(&dwglobals)
 
-	// Need to reorder symbols so SDWARFINFO is after all SDWARFSECT
-	// (but we need to generate dies before writepub)
-	writeinfo(last)
-	infosyms := last.Next
+	infoo = Cpos()
+	writeinfo()
+	infoe := Cpos()
+	pubnameso = infoe
+	pubtypeso = infoe
+	arangeso = infoe
+	gdbscripto = infoe
 
-	last = writepub(".debug_pubnames", ispubname, last)
-	last = writepub(".debug_pubtypes", ispubtype, last)
-	last = writearanges(last)
-	last = writegdbscript(last)
-	last.Next = infosyms
+	if fwdcount > 0 {
+		if Debug['v'] != 0 {
+			fmt.Fprintf(&Bso, "%5.2f dwarf pass 2.\n", obj.Cputime())
+		}
+		Cseek(infoo)
+		writeinfo()
+		if fwdcount > 0 {
+			Exitf("dwarf: unresolved references after first dwarf info pass")
+		}
+
+		if infoe != Cpos() {
+			Exitf("dwarf: inconsistent second dwarf info pass")
+		}
+	}
+
+	infosize = infoe - infoo
+	align(infosize)
+
+	pubnameso = writepub(ispubname)
+	pubnamessize = Cpos() - pubnameso
+	align(pubnamessize)
+
+	pubtypeso = writepub(ispubtype)
+	pubtypessize = Cpos() - pubtypeso
+	align(pubtypessize)
+
+	arangeso = writearanges()
+	arangessize = Cpos() - arangeso
+	align(arangessize)
+
+	gdbscripto = writegdbscript()
+	gdbscriptsize = Cpos() - gdbscripto
+	align(gdbscriptsize)
+
+	for Cpos()&7 != 0 {
+		Cput(0)
+	}
+	if HEADTYPE != obj.Hdarwin {
+		dwarfemitreloc()
+	}
+}
+
+func dwarfemitreloc() {
+	if Debug['w'] != 0 { // disable dwarf
+		return
+	}
+	inforeloco = writedwarfreloc(infosec)
+	inforelocsize = Cpos() - inforeloco
+	align(inforelocsize)
+
+	arangesreloco = writedwarfreloc(arangessec)
+	arangesrelocsize = Cpos() - arangesreloco
+	align(arangesrelocsize)
+
+	linereloco = writedwarfreloc(linesec)
+	linerelocsize = Cpos() - linereloco
+	align(linerelocsize)
+
+	framereloco = writedwarfreloc(framesec)
+	framerelocsize = Cpos() - framereloco
+	align(framerelocsize)
 }
 
 /*
  *  Elf.
  */
+const (
+	ElfStrDebugAbbrev = iota
+	ElfStrDebugAranges
+	ElfStrDebugFrame
+	ElfStrDebugInfo
+	ElfStrDebugLine
+	ElfStrDebugLoc
+	ElfStrDebugMacinfo
+	ElfStrDebugPubNames
+	ElfStrDebugPubTypes
+	ElfStrDebugRanges
+	ElfStrDebugStr
+	ElfStrGDBScripts
+	ElfStrRelDebugInfo
+	ElfStrRelDebugAranges
+	ElfStrRelDebugLine
+	ElfStrRelDebugFrame
+	NElfStrDbg
+)
+
+var elfstrdbg [NElfStrDbg]int64
+
 func dwarfaddshstrings(shstrtab *LSym) {
 	if Debug['w'] != 0 { // disable dwarf
 		return
 	}
 
-	Addstring(shstrtab, ".debug_abbrev")
-	Addstring(shstrtab, ".debug_aranges")
-	Addstring(shstrtab, ".debug_frame")
-	Addstring(shstrtab, ".debug_info")
-	Addstring(shstrtab, ".debug_line")
-	Addstring(shstrtab, ".debug_pubnames")
-	Addstring(shstrtab, ".debug_pubtypes")
-	Addstring(shstrtab, ".debug_gdb_scripts")
+	elfstrdbg[ElfStrDebugAbbrev] = Addstring(shstrtab, ".debug_abbrev")
+	elfstrdbg[ElfStrDebugAranges] = Addstring(shstrtab, ".debug_aranges")
+	elfstrdbg[ElfStrDebugFrame] = Addstring(shstrtab, ".debug_frame")
+	elfstrdbg[ElfStrDebugInfo] = Addstring(shstrtab, ".debug_info")
+	elfstrdbg[ElfStrDebugLine] = Addstring(shstrtab, ".debug_line")
+	elfstrdbg[ElfStrDebugLoc] = Addstring(shstrtab, ".debug_loc")
+	elfstrdbg[ElfStrDebugMacinfo] = Addstring(shstrtab, ".debug_macinfo")
+	elfstrdbg[ElfStrDebugPubNames] = Addstring(shstrtab, ".debug_pubnames")
+	elfstrdbg[ElfStrDebugPubTypes] = Addstring(shstrtab, ".debug_pubtypes")
+	elfstrdbg[ElfStrDebugRanges] = Addstring(shstrtab, ".debug_ranges")
+	elfstrdbg[ElfStrDebugStr] = Addstring(shstrtab, ".debug_str")
+	elfstrdbg[ElfStrGDBScripts] = Addstring(shstrtab, ".debug_gdb_scripts")
 	if Linkmode == LinkExternal {
-		Addstring(shstrtab, elfRelType+".debug_info")
-		Addstring(shstrtab, elfRelType+".debug_aranges")
-		Addstring(shstrtab, elfRelType+".debug_line")
-		Addstring(shstrtab, elfRelType+".debug_frame")
-		Addstring(shstrtab, elfRelType+".debug_pubnames")
-		Addstring(shstrtab, elfRelType+".debug_pubtypes")
+		switch Thearch.Thechar {
+		case '0', '6', '7', '9':
+			elfstrdbg[ElfStrRelDebugInfo] = Addstring(shstrtab, ".rela.debug_info")
+			elfstrdbg[ElfStrRelDebugAranges] = Addstring(shstrtab, ".rela.debug_aranges")
+			elfstrdbg[ElfStrRelDebugLine] = Addstring(shstrtab, ".rela.debug_line")
+			elfstrdbg[ElfStrRelDebugFrame] = Addstring(shstrtab, ".rela.debug_frame")
+		default:
+			elfstrdbg[ElfStrRelDebugInfo] = Addstring(shstrtab, ".rel.debug_info")
+			elfstrdbg[ElfStrRelDebugAranges] = Addstring(shstrtab, ".rel.debug_aranges")
+			elfstrdbg[ElfStrRelDebugLine] = Addstring(shstrtab, ".rel.debug_line")
+			elfstrdbg[ElfStrRelDebugFrame] = Addstring(shstrtab, ".rel.debug_frame")
+		}
+
+		infosym = Linklookup(Ctxt, ".debug_info", 0)
+		infosym.Hide = 1
+
+		abbrevsym = Linklookup(Ctxt, ".debug_abbrev", 0)
+		abbrevsym.Hide = 1
+
+		linesym = Linklookup(Ctxt, ".debug_line", 0)
+		linesym.Hide = 1
+
+		framesym = Linklookup(Ctxt, ".debug_frame", 0)
+		framesym.Hide = 1
 	}
 }
 
 // Add section symbols for DWARF debug info.  This is called before
 // dwarfaddelfheaders.
 func dwarfaddelfsectionsyms() {
+	if infosym != nil {
+		infosympos = Cpos()
+		putelfsectionsym(infosym, 0)
+	}
+
+	if abbrevsym != nil {
+		abbrevsympos = Cpos()
+		putelfsectionsym(abbrevsym, 0)
+	}
+
+	if linesym != nil {
+		linesympos = Cpos()
+		putelfsectionsym(linesym, 0)
+	}
+
+	if framesym != nil {
+		framesympos = Cpos()
+		putelfsectionsym(framesym, 0)
+	}
+}
+
+func dwarfaddelfrelocheader(elfstr int, shdata *ElfShdr, off int64, size int64) {
+	sh := newElfShdr(elfstrdbg[elfstr])
+	switch Thearch.Thechar {
+	case '0', '6', '7', '9':
+		sh.type_ = SHT_RELA
+	default:
+		sh.type_ = SHT_REL
+	}
+
+	sh.entsize = uint64(Thearch.Ptrsize) * 2
+	if sh.type_ == SHT_RELA {
+		sh.entsize += uint64(Thearch.Ptrsize)
+	}
+	sh.link = uint32(elfshname(".symtab").shnum)
+	sh.info = uint32(shdata.shnum)
+	sh.off = uint64(off)
+	sh.size = uint64(size)
+	sh.addralign = uint64(Thearch.Ptrsize)
+}
+
+func dwarfaddelfheaders() {
 	if Debug['w'] != 0 { // disable dwarf
 		return
 	}
-	if Linkmode != LinkExternal {
+
+	sh := newElfShdr(elfstrdbg[ElfStrDebugAbbrev])
+	sh.type_ = SHT_PROGBITS
+	sh.off = uint64(abbrevo)
+	sh.size = uint64(abbrevsize)
+	sh.addralign = 1
+	if abbrevsympos > 0 {
+		putelfsymshndx(abbrevsympos, sh.shnum)
+	}
+
+	sh = newElfShdr(elfstrdbg[ElfStrDebugLine])
+	sh.type_ = SHT_PROGBITS
+	sh.off = uint64(lineo)
+	sh.size = uint64(linesize)
+	sh.addralign = 1
+	if linesympos > 0 {
+		putelfsymshndx(linesympos, sh.shnum)
+	}
+	shline := sh
+
+	sh = newElfShdr(elfstrdbg[ElfStrDebugFrame])
+	sh.type_ = SHT_PROGBITS
+	sh.off = uint64(frameo)
+	sh.size = uint64(framesize)
+	sh.addralign = 1
+	if framesympos > 0 {
+		putelfsymshndx(framesympos, sh.shnum)
+	}
+	shframe := sh
+
+	sh = newElfShdr(elfstrdbg[ElfStrDebugInfo])
+	sh.type_ = SHT_PROGBITS
+	sh.off = uint64(infoo)
+	sh.size = uint64(infosize)
+	sh.addralign = 1
+	if infosympos > 0 {
+		putelfsymshndx(infosympos, sh.shnum)
+	}
+	shinfo := sh
+
+	if pubnamessize > 0 {
+		sh := newElfShdr(elfstrdbg[ElfStrDebugPubNames])
+		sh.type_ = SHT_PROGBITS
+		sh.off = uint64(pubnameso)
+		sh.size = uint64(pubnamessize)
+		sh.addralign = 1
+	}
+
+	if pubtypessize > 0 {
+		sh := newElfShdr(elfstrdbg[ElfStrDebugPubTypes])
+		sh.type_ = SHT_PROGBITS
+		sh.off = uint64(pubtypeso)
+		sh.size = uint64(pubtypessize)
+		sh.addralign = 1
+	}
+
+	var sharanges *ElfShdr
+	if arangessize != 0 {
+		sh := newElfShdr(elfstrdbg[ElfStrDebugAranges])
+		sh.type_ = SHT_PROGBITS
+		sh.off = uint64(arangeso)
+		sh.size = uint64(arangessize)
+		sh.addralign = 1
+		sharanges = sh
+	}
+
+	if gdbscriptsize != 0 {
+		sh := newElfShdr(elfstrdbg[ElfStrGDBScripts])
+		sh.type_ = SHT_PROGBITS
+		sh.off = uint64(gdbscripto)
+		sh.size = uint64(gdbscriptsize)
+		sh.addralign = 1
+	}
+
+	if inforelocsize != 0 {
+		dwarfaddelfrelocheader(ElfStrRelDebugInfo, shinfo, inforeloco, inforelocsize)
+	}
+
+	if arangesrelocsize != 0 {
+		dwarfaddelfrelocheader(ElfStrRelDebugAranges, sharanges, arangesreloco, arangesrelocsize)
+	}
+
+	if linerelocsize != 0 {
+		dwarfaddelfrelocheader(ElfStrRelDebugLine, shline, linereloco, linerelocsize)
+	}
+
+	if framerelocsize != 0 {
+		dwarfaddelfrelocheader(ElfStrRelDebugFrame, shframe, framereloco, framerelocsize)
+	}
+}
+
+/*
+ * Macho
+ */
+func dwarfaddmachoheaders(ms *MachoSeg) {
+	if Debug['w'] != 0 { // disable dwarf
 		return
 	}
-	sym := Linklookup(Ctxt, ".debug_info", 0)
-	putelfsectionsym(sym, sym.Sect.Elfsect.shnum)
-	sym = Linklookup(Ctxt, ".debug_abbrev", 0)
-	putelfsectionsym(sym, sym.Sect.Elfsect.shnum)
-	sym = Linklookup(Ctxt, ".debug_line", 0)
-	putelfsectionsym(sym, sym.Sect.Elfsect.shnum)
-	sym = Linklookup(Ctxt, ".debug_frame", 0)
-	putelfsectionsym(sym, sym.Sect.Elfsect.shnum)
+
+	// Zero vsize segments won't be loaded in memory, even so they
+	// have to be page aligned in the file.
+	fakestart := Rnd(int64(Segdwarf.Fileoff), 0x1000)
+	addr := Segdata.Vaddr + Segdata.Length
+
+	nsect := 4
+	if pubnamessize > 0 {
+		nsect++
+	}
+	if pubtypessize > 0 {
+		nsect++
+	}
+	if arangessize > 0 {
+		nsect++
+	}
+	if gdbscriptsize > 0 {
+		nsect++
+	}
+
+	if Linkmode != LinkExternal {
+		ms = newMachoSeg("__DWARF", nsect)
+		ms.fileoffset = uint64(fakestart)
+		ms.filesize = Segdwarf.Filelen
+		ms.vaddr = addr
+	}
+
+	msect := newMachoSect(ms, "__debug_abbrev", "__DWARF")
+	msect.off = uint32(abbrevo)
+	msect.size = uint64(abbrevsize)
+	msect.addr = addr
+	addr += msect.size
+	msect.flag = 0x02000000
+	if abbrevsym != nil {
+		abbrevsym.Value = int64(msect.addr)
+	}
+
+	msect = newMachoSect(ms, "__debug_line", "__DWARF")
+	msect.off = uint32(lineo)
+	msect.size = uint64(linesize)
+	msect.addr = addr
+	addr += msect.size
+	msect.flag = 0x02000000
+	if linesym != nil {
+		linesym.Value = int64(msect.addr)
+	}
+	if linerelocsize > 0 {
+		msect.nreloc = uint32(len(linesec.R))
+		msect.reloc = uint32(linereloco)
+	}
+
+	msect = newMachoSect(ms, "__debug_frame", "__DWARF")
+	msect.off = uint32(frameo)
+	msect.size = uint64(framesize)
+	msect.addr = addr
+	addr += msect.size
+	msect.flag = 0x02000000
+	if framesym != nil {
+		framesym.Value = int64(msect.addr)
+	}
+	if framerelocsize > 0 {
+		msect.nreloc = uint32(len(framesec.R))
+		msect.reloc = uint32(framereloco)
+	}
+
+	msect = newMachoSect(ms, "__debug_info", "__DWARF")
+	msect.off = uint32(infoo)
+	msect.size = uint64(infosize)
+	msect.addr = addr
+	addr += msect.size
+	msect.flag = 0x02000000
+	if infosym != nil {
+		infosym.Value = int64(msect.addr)
+	}
+	if inforelocsize > 0 {
+		msect.nreloc = uint32(len(infosec.R))
+		msect.reloc = uint32(inforeloco)
+	}
+
+	if pubnamessize > 0 {
+		msect := newMachoSect(ms, "__debug_pubnames", "__DWARF")
+		msect.off = uint32(pubnameso)
+		msect.size = uint64(pubnamessize)
+		msect.addr = addr
+		addr += msect.size
+		msect.flag = 0x02000000
+	}
+
+	if pubtypessize > 0 {
+		msect := newMachoSect(ms, "__debug_pubtypes", "__DWARF")
+		msect.off = uint32(pubtypeso)
+		msect.size = uint64(pubtypessize)
+		msect.addr = addr
+		addr += msect.size
+		msect.flag = 0x02000000
+	}
+
+	if arangessize > 0 {
+		msect := newMachoSect(ms, "__debug_aranges", "__DWARF")
+		msect.off = uint32(arangeso)
+		msect.size = uint64(arangessize)
+		msect.addr = addr
+		addr += msect.size
+		msect.flag = 0x02000000
+		if arangesrelocsize > 0 {
+			msect.nreloc = uint32(len(arangessec.R))
+			msect.reloc = uint32(arangesreloco)
+		}
+	}
+
+	// TODO(lvd) fix gdb/python to load MachO (16 char section name limit)
+	if gdbscriptsize > 0 {
+		msect := newMachoSect(ms, "__debug_gdb_scripts", "__DWARF")
+		msect.off = uint32(gdbscripto)
+		msect.size = uint64(gdbscriptsize)
+		msect.addr = addr
+		addr += msect.size
+		msect.flag = 0x02000000
+	}
 }
 
 /*
@@ -2073,12 +2537,13 @@ func dwarfaddpeheaders() {
 	if Debug['w'] != 0 { // disable dwarf
 		return
 	}
-	for sect := Segdwarf.Sect; sect != nil; sect = sect.Next {
-		h := newPEDWARFSection(sect.Name, int64(sect.Length))
-		fileoff := sect.Vaddr - Segdwarf.Vaddr + Segdwarf.Fileoff
-		if uint64(h.PointerToRawData) != fileoff {
-			Diag("%s.PointerToRawData = %#x, want %#x", sect.Name, h.PointerToRawData, fileoff)
-			errorexit()
-		}
-	}
+
+	newPEDWARFSection(".debug_abbrev", abbrevsize)
+	newPEDWARFSection(".debug_line", linesize)
+	newPEDWARFSection(".debug_frame", framesize)
+	newPEDWARFSection(".debug_info", infosize)
+	newPEDWARFSection(".debug_pubnames", pubnamessize)
+	newPEDWARFSection(".debug_pubtypes", pubtypessize)
+	newPEDWARFSection(".debug_aranges", arangessize)
+	newPEDWARFSection(".debug_gdb_scripts", gdbscriptsize)
 }

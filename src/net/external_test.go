@@ -6,15 +6,15 @@ package net
 
 import (
 	"fmt"
-	"internal/testenv"
 	"io"
 	"strings"
 	"testing"
 )
 
 func TestResolveGoogle(t *testing.T) {
-	testenv.MustHaveExternalNetwork(t)
-
+	if testing.Short() || !*testExternal {
+		t.Skip("avoid external network")
+	}
 	if !supportsIPv4 || !supportsIPv6 || !*testIPv4 || !*testIPv6 {
 		t.Skip("both IPv4 and IPv6 are required")
 	}
@@ -60,8 +60,9 @@ var dialGoogleTests = []struct {
 }
 
 func TestDialGoogle(t *testing.T) {
-	testenv.MustHaveExternalNetwork(t)
-
+	if testing.Short() || !*testExternal {
+		t.Skip("avoid external network")
+	}
 	if !supportsIPv4 || !supportsIPv6 || !*testIPv4 || !*testIPv6 {
 		t.Skip("both IPv4 and IPv6 are required")
 	}

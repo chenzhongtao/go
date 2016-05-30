@@ -36,6 +36,9 @@ func (r *Reader) Len() int {
 func (r *Reader) Size() int64 { return int64(len(r.s)) }
 
 func (r *Reader) Read(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
 	if r.i >= int64(len(r.s)) {
 		return 0, io.EOF
 	}
@@ -60,14 +63,14 @@ func (r *Reader) ReadAt(b []byte, off int64) (n int, err error) {
 	return
 }
 
-func (r *Reader) ReadByte() (byte, error) {
+func (r *Reader) ReadByte() (b byte, err error) {
 	r.prevRune = -1
 	if r.i >= int64(len(r.s)) {
 		return 0, io.EOF
 	}
-	b := r.s[r.i]
+	b = r.s[r.i]
 	r.i++
-	return b, nil
+	return
 }
 
 func (r *Reader) UnreadByte() error {
@@ -108,11 +111,11 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 	r.prevRune = -1
 	var abs int64
 	switch whence {
-	case io.SeekStart:
+	case 0:
 		abs = offset
-	case io.SeekCurrent:
-		abs = r.i + offset
-	case io.SeekEnd:
+	case 1:
+		abs = int64(r.i) + offset
+	case 2:
 		abs = int64(len(r.s)) + offset
 	default:
 		return 0, errors.New("bytes.Reader.Seek: invalid whence")
@@ -142,9 +145,6 @@ func (r *Reader) WriteTo(w io.Writer) (n int64, err error) {
 	}
 	return
 }
-
-// Reset resets the Reader to be reading from b.
-func (r *Reader) Reset(b []byte) { *r = Reader{b, 0, -1} }
 
 // NewReader returns a new Reader reading from b.
 func NewReader(b []byte) *Reader { return &Reader{b, 0, -1} }

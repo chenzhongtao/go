@@ -90,10 +90,6 @@ func NewSingleHostReverseProxy(target *url.URL) *ReverseProxy {
 		} else {
 			req.URL.RawQuery = targetQuery + "&" + req.URL.RawQuery
 		}
-		if _, ok := req.Header["User-Agent"]; !ok {
-			// explicitly disable User-Agent so it's not set to default value
-			req.Header.Set("User-Agent", "")
-		}
 	}
 	return &ReverseProxy{Director: director}
 }
@@ -184,9 +180,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	outreq.ProtoMinor = 1
 	outreq.Close = false
 
-	// Remove hop-by-hop headers to the backend. Especially
+	// Remove hop-by-hop headers to the backend.  Especially
 	// important is "Connection" because we want a persistent
-	// connection, regardless of what the client sent to us. This
+	// connection, regardless of what the client sent to us.  This
 	// is modifying the same underlying map from req (shallow
 	// copied above) so we only copy it if necessary.
 	copiedHeaders := false
@@ -214,7 +210,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	res, err := transport.RoundTrip(outreq)
 	if err != nil {
 		p.logf("http: proxy error: %v", err)
-		rw.WriteHeader(http.StatusBadGateway)
+		rw.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
@@ -289,13 +285,13 @@ type maxLatencyWriter struct {
 	dst     writeFlusher
 	latency time.Duration
 
-	mu   sync.Mutex // protects Write + Flush
+	lk   sync.Mutex // protects Write + Flush
 	done chan bool
 }
 
 func (m *maxLatencyWriter) Write(p []byte) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lk.Lock()
+	defer m.lk.Unlock()
 	return m.dst.Write(p)
 }
 
@@ -310,9 +306,9 @@ func (m *maxLatencyWriter) flushLoop() {
 			}
 			return
 		case <-t.C:
-			m.mu.Lock()
+			m.lk.Lock()
 			m.dst.Flush()
-			m.mu.Unlock()
+			m.lk.Unlock()
 		}
 	}
 }

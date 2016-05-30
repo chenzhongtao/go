@@ -12,7 +12,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,78 +27,12 @@ import (
 // Note: see comment in handshake_test.go for details of how the reference
 // tests work.
 
-// opensslInputEvent enumerates possible inputs that can be sent to an `openssl
-// s_client` process.
-type opensslInputEvent int
+// blockingSource is an io.Reader that blocks a Read call until it's closed.
+type blockingSource chan bool
 
-const (
-	// opensslRenegotiate causes OpenSSL to request a renegotiation of the
-	// connection.
-	opensslRenegotiate opensslInputEvent = iota
-
-	// opensslSendBanner causes OpenSSL to send the contents of
-	// opensslSentinel on the connection.
-	opensslSendSentinel
-)
-
-const opensslSentinel = "SENTINEL\n"
-
-type opensslInput chan opensslInputEvent
-
-func (i opensslInput) Read(buf []byte) (n int, err error) {
-	for event := range i {
-		switch event {
-		case opensslRenegotiate:
-			return copy(buf, []byte("R\n")), nil
-		case opensslSendSentinel:
-			return copy(buf, []byte(opensslSentinel)), nil
-		default:
-			panic("unknown event")
-		}
-	}
-
+func (b blockingSource) Read([]byte) (n int, err error) {
+	<-b
 	return 0, io.EOF
-}
-
-// opensslOutputSink is an io.Writer that receives the stdout and stderr from
-// an `openssl` process and sends a value to handshakeComplete when it sees a
-// log message from a completed server handshake.
-type opensslOutputSink struct {
-	handshakeComplete chan struct{}
-	all               []byte
-	line              []byte
-}
-
-func newOpensslOutputSink() *opensslOutputSink {
-	return &opensslOutputSink{make(chan struct{}), nil, nil}
-}
-
-// opensslEndOfHandshake is a message that the “openssl s_server” tool will
-// print when a handshake completes if run with “-state”.
-const opensslEndOfHandshake = "SSL_accept:SSLv3 write finished A"
-
-func (o *opensslOutputSink) Write(data []byte) (n int, err error) {
-	o.line = append(o.line, data...)
-	o.all = append(o.all, data...)
-
-	for {
-		i := bytes.Index(o.line, []byte{'\n'})
-		if i < 0 {
-			break
-		}
-
-		if bytes.Equal([]byte(opensslEndOfHandshake), o.line[:i]) {
-			o.handshakeComplete <- struct{}{}
-		}
-		o.line = o.line[i+1:]
-	}
-
-	return len(data), nil
-}
-
-func (o *opensslOutputSink) WriteTo(w io.Writer) (int64, error) {
-	n, err := w.Write(o.all)
-	return int64(n), err
 }
 
 // clientTest represents a test of the TLS client handshake against a reference
@@ -127,25 +60,15 @@ type clientTest struct {
 	// ConnectionState of the resulting connection. It returns a non-nil
 	// error if the ConnectionState is unacceptable.
 	validate func(ConnectionState) error
-	// numRenegotiations is the number of times that the connection will be
-	// renegotiated.
-	numRenegotiations int
-	// renegotiationExpectedToFail, if not zero, is the number of the
-	// renegotiation attempt that is expected to fail.
-	renegotiationExpectedToFail int
-	// checkRenegotiationError, if not nil, is called with any error
-	// arising from renegotiation. It can map expected errors to nil to
-	// ignore them.
-	checkRenegotiationError func(renegotiationNum int, err error) error
 }
 
 var defaultServerCommand = []string{"openssl", "s_server"}
 
 // connFromCommand starts the reference server process, connects to it and
-// returns a recordingConn for the connection. The stdin return value is an
-// opensslInput for the stdin of the child process. It must be closed before
+// returns a recordingConn for the connection. The stdin return value is a
+// blockingSource for the stdin of the child process. It must be closed before
 // Waiting for child.
-func (test *clientTest) connFromCommand() (conn *recordingConn, child *exec.Cmd, stdin opensslInput, stdout *opensslOutputSink, err error) {
+func (test *clientTest) connFromCommand() (conn *recordingConn, child *exec.Cmd, stdin blockingSource, err error) {
 	cert := testRSACertificate
 	if len(test.cert) > 0 {
 		cert = test.cert
@@ -208,28 +131,14 @@ func (test *clientTest) connFromCommand() (conn *recordingConn, child *exec.Cmd,
 		command = append(command, "-serverinfo", serverInfoPath)
 	}
 
-	if test.numRenegotiations > 0 {
-		found := false
-		for _, flag := range command[1:] {
-			if flag == "-state" {
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			panic("-state flag missing to OpenSSL. You need this if testing renegotiation")
-		}
-	}
-
 	cmd := exec.Command(command[0], command[1:]...)
-	stdin = opensslInput(make(chan opensslInputEvent))
+	stdin = blockingSource(make(chan bool))
 	cmd.Stdin = stdin
-	out := newOpensslOutputSink()
-	cmd.Stdout = out
-	cmd.Stderr = out
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// OpenSSL does print an "ACCEPT" banner, but it does so *before*
@@ -251,14 +160,14 @@ func (test *clientTest) connFromCommand() (conn *recordingConn, child *exec.Cmd,
 		close(stdin)
 		out.WriteTo(os.Stdout)
 		cmd.Process.Kill()
-		return nil, nil, nil, nil, cmd.Wait()
+		return nil, nil, nil, cmd.Wait()
 	}
 
 	record := &recordingConn{
 		Conn: tcpConn,
 	}
 
-	return record, cmd, stdin, out, nil
+	return record, cmd, stdin, nil
 }
 
 func (test *clientTest) dataPath() string {
@@ -278,12 +187,11 @@ func (test *clientTest) run(t *testing.T, write bool) {
 	var clientConn, serverConn net.Conn
 	var recordingConn *recordingConn
 	var childProcess *exec.Cmd
-	var stdin opensslInput
-	var stdout *opensslOutputSink
+	var stdin blockingSource
 
 	if write {
 		var err error
-		recordingConn, childProcess, stdin, stdout, err = test.connFromCommand()
+		recordingConn, childProcess, stdin, err = test.connFromCommand()
 		if err != nil {
 			t.Fatalf("Failed to start subcommand: %s", err)
 		}
@@ -300,77 +208,17 @@ func (test *clientTest) run(t *testing.T, write bool) {
 
 	doneChan := make(chan bool)
 	go func() {
-		defer func() { doneChan <- true }()
-		defer clientConn.Close()
-		defer client.Close()
-
 		if _, err := client.Write([]byte("hello\n")); err != nil {
 			t.Errorf("Client.Write failed: %s", err)
-			return
 		}
-
-		for i := 1; i <= test.numRenegotiations; i++ {
-			// The initial handshake will generate a
-			// handshakeComplete signal which needs to be quashed.
-			if i == 1 && write {
-				<-stdout.handshakeComplete
-			}
-
-			// OpenSSL will try to interleave application data and
-			// a renegotiation if we send both concurrently.
-			// Therefore: ask OpensSSL to start a renegotiation, run
-			// a goroutine to call client.Read and thus process the
-			// renegotiation request, watch for OpenSSL's stdout to
-			// indicate that the handshake is complete and,
-			// finally, have OpenSSL write something to cause
-			// client.Read to complete.
-			if write {
-				stdin <- opensslRenegotiate
-			}
-
-			signalChan := make(chan struct{})
-
-			go func() {
-				defer func() { signalChan <- struct{}{} }()
-
-				buf := make([]byte, 256)
-				n, err := client.Read(buf)
-
-				if test.checkRenegotiationError != nil {
-					newErr := test.checkRenegotiationError(i, err)
-					if err != nil && newErr == nil {
-						return
-					}
-					err = newErr
-				}
-
-				if err != nil {
-					t.Errorf("Client.Read failed after renegotiation #%d: %s", i, err)
-					return
-				}
-
-				buf = buf[:n]
-				if !bytes.Equal([]byte(opensslSentinel), buf) {
-					t.Errorf("Client.Read returned %q, but wanted %q", string(buf), opensslSentinel)
-				}
-
-				if expected := i + 1; client.handshakes != expected {
-					t.Errorf("client should have recorded %d handshakes, but believes that %d have occured", expected, client.handshakes)
-				}
-			}()
-
-			if write && test.renegotiationExpectedToFail != i {
-				<-stdout.handshakeComplete
-				stdin <- opensslSendSentinel
-			}
-			<-signalChan
-		}
-
 		if test.validate != nil {
 			if err := test.validate(client.ConnectionState()); err != nil {
 				t.Errorf("validate callback returned error: %s", err)
 			}
 		}
+		client.Close()
+		clientConn.Close()
+		doneChan <- true
 	}()
 
 	if !write {
@@ -600,7 +448,7 @@ func TestClientResumption(t *testing.T) {
 			t.Fatalf("%s resumed: %v, expected: %v", test, hs.DidResume, didResume)
 		}
 		if didResume && (hs.PeerCertificates == nil || hs.VerifiedChains == nil) {
-			t.Fatalf("expected non-nil certificates after resumption. Got peerCertificates: %#v, verifiedCertificates: %#v", hs.PeerCertificates, hs.VerifiedChains)
+			t.Fatalf("expected non-nil certificates after resumption. Got peerCertificates: %#v, verifedCertificates: %#v", hs.PeerCertificates, hs.VerifiedChains)
 		}
 	}
 
@@ -770,113 +618,14 @@ func TestHandshakClientSCTs(t *testing.T) {
 	runClientTestTLS12(t, test)
 }
 
-func TestRenegotiationRejected(t *testing.T) {
-	config := *testConfig
-	test := &clientTest{
-		name:                        "RenegotiationRejected",
-		command:                     []string{"openssl", "s_server", "-state"},
-		config:                      &config,
-		numRenegotiations:           1,
-		renegotiationExpectedToFail: 1,
-		checkRenegotiationError: func(renegotiationNum int, err error) error {
-			if err == nil {
-				return errors.New("expected error from renegotiation but got nil")
-			}
-			if !strings.Contains(err.Error(), "no renegotiation") {
-				return fmt.Errorf("expected renegotiation to be rejected but got %q", err)
-			}
-			return nil
-		},
-	}
-
-	runClientTestTLS12(t, test)
-}
-
-func TestRenegotiateOnce(t *testing.T) {
-	config := *testConfig
-	config.Renegotiation = RenegotiateOnceAsClient
-
-	test := &clientTest{
-		name:              "RenegotiateOnce",
-		command:           []string{"openssl", "s_server", "-state"},
-		config:            &config,
-		numRenegotiations: 1,
-	}
-
-	runClientTestTLS12(t, test)
-}
-
-func TestRenegotiateTwice(t *testing.T) {
-	config := *testConfig
-	config.Renegotiation = RenegotiateFreelyAsClient
-
-	test := &clientTest{
-		name:              "RenegotiateTwice",
-		command:           []string{"openssl", "s_server", "-state"},
-		config:            &config,
-		numRenegotiations: 2,
-	}
-
-	runClientTestTLS12(t, test)
-}
-
-func TestRenegotiateTwiceRejected(t *testing.T) {
-	config := *testConfig
-	config.Renegotiation = RenegotiateOnceAsClient
-
-	test := &clientTest{
-		name:                        "RenegotiateTwiceRejected",
-		command:                     []string{"openssl", "s_server", "-state"},
-		config:                      &config,
-		numRenegotiations:           2,
-		renegotiationExpectedToFail: 2,
-		checkRenegotiationError: func(renegotiationNum int, err error) error {
-			if renegotiationNum == 1 {
-				return err
-			}
-
-			if err == nil {
-				return errors.New("expected error from renegotiation but got nil")
-			}
-			if !strings.Contains(err.Error(), "no renegotiation") {
-				return fmt.Errorf("expected renegotiation to be rejected but got %q", err)
-			}
-			return nil
-		},
-	}
-
-	runClientTestTLS12(t, test)
-}
-
-var hostnameInSNITests = []struct {
-	in, out string
-}{
-	// Opaque string
-	{"", ""},
-	{"localhost", "localhost"},
-	{"foo, bar, baz and qux", "foo, bar, baz and qux"},
-
-	// DNS hostname
-	{"golang.org", "golang.org"},
-	{"golang.org.", "golang.org"},
-
-	// Literal IPv4 address
-	{"1.2.3.4", ""},
-
-	// Literal IPv6 address
-	{"::1", ""},
-	{"::1%lo0", ""}, // with zone identifier
-	{"[::1]", ""},   // as per RFC 5952 we allow the [] style as IPv6 literal
-	{"[::1%lo0]", ""},
-}
-
-func TestHostnameInSNI(t *testing.T) {
-	for _, tt := range hostnameInSNITests {
+func TestNoIPAddressesInSNI(t *testing.T) {
+	for _, ipLiteral := range []string{"1.2.3.4", "::1"} {
 		c, s := net.Pipe()
 
-		go func(host string) {
-			Client(c, &Config{ServerName: host, InsecureSkipVerify: true}).Handshake()
-		}(tt.in)
+		go func() {
+			client := Client(c, &Config{ServerName: ipLiteral})
+			client.Handshake()
+		}()
 
 		var header [5]byte
 		if _, err := io.ReadFull(s, header[:]); err != nil {
@@ -888,20 +637,10 @@ func TestHostnameInSNI(t *testing.T) {
 		if _, err := io.ReadFull(s, record[:]); err != nil {
 			t.Fatal(err)
 		}
-
-		c.Close()
 		s.Close()
 
-		var m clientHelloMsg
-		if !m.unmarshal(record) {
-			t.Errorf("unmarshaling ClientHello for %q failed", tt.in)
-			continue
-		}
-		if tt.in != tt.out && m.serverName == tt.in {
-			t.Errorf("prohibited %q found in ClientHello: %x", tt.in, record)
-		}
-		if m.serverName != tt.out {
-			t.Errorf("expected %q not found in ClientHello: %x", tt.out, record)
+		if bytes.Index(record, []byte(ipLiteral)) != -1 {
+			t.Errorf("IP literal %q found in ClientHello: %x", ipLiteral, record)
 		}
 	}
 }
@@ -953,53 +692,5 @@ func TestServerSelectingUnconfiguredCipherSuite(t *testing.T) {
 
 	if err := <-errChan; !strings.Contains(err.Error(), "unconfigured cipher") {
 		t.Fatalf("Expected error about unconfigured cipher suite but got %q", err)
-	}
-}
-
-// brokenConn wraps a net.Conn and causes all Writes after a certain number to
-// fail with brokenConnErr.
-type brokenConn struct {
-	net.Conn
-
-	// breakAfter is the number of successful writes that will be allowed
-	// before all subsequent writes fail.
-	breakAfter int
-
-	// numWrites is the number of writes that have been done.
-	numWrites int
-}
-
-// brokenConnErr is the error that brokenConn returns once exhausted.
-var brokenConnErr = errors.New("too many writes to brokenConn")
-
-func (b *brokenConn) Write(data []byte) (int, error) {
-	if b.numWrites >= b.breakAfter {
-		return 0, brokenConnErr
-	}
-
-	b.numWrites++
-	return b.Conn.Write(data)
-}
-
-func TestFailedWrite(t *testing.T) {
-	// Test that a write error during the handshake is returned.
-	for _, breakAfter := range []int{0, 1, 2, 3} {
-		c, s := net.Pipe()
-		done := make(chan bool)
-
-		go func() {
-			Server(s, testConfig).Handshake()
-			s.Close()
-			done <- true
-		}()
-
-		brokenC := &brokenConn{Conn: c, breakAfter: breakAfter}
-		err := Client(brokenC, testConfig).Handshake()
-		if err != brokenConnErr {
-			t.Errorf("#%d: expected error from brokenConn but got %q", breakAfter, err)
-		}
-		brokenC.Close()
-
-		<-done
 	}
 }

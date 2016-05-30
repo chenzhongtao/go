@@ -49,7 +49,7 @@ Pattern:
 		star, chunk, pattern = scanChunk(pattern)
 		if star && chunk == "" {
 			// Trailing * matches rest of string unless it has a /.
-			return !strings.Contains(name, string(Separator)), nil
+			return strings.Index(name, string(Separator)) < 0, nil
 		}
 		// Look for match at current position.
 		t, ok, err := matchChunk(chunk, name)
@@ -240,10 +240,13 @@ func Glob(pattern string) (matches []string, err error) {
 	}
 
 	dir, file := Split(pattern)
-	if runtime.GOOS == "windows" {
-		dir = cleanGlobPathWindows(dir)
-	} else {
-		dir = cleanGlobPath(dir)
+	switch dir {
+	case "":
+		dir = "."
+	case string(Separator):
+		// nothing
+	default:
+		dir = dir[0 : len(dir)-1] // chop off trailing separator
 	}
 
 	if !hasMeta(dir) {
@@ -262,35 +265,6 @@ func Glob(pattern string) (matches []string, err error) {
 		}
 	}
 	return
-}
-
-// cleanGlobPath prepares path for glob matching.
-func cleanGlobPath(path string) string {
-	switch path {
-	case "":
-		return "."
-	case string(Separator):
-		// do nothing to the path
-		return path
-	default:
-		return path[0 : len(path)-1] // chop off trailing separator
-	}
-}
-
-// cleanGlobPathWindows is windows version of cleanGlobPath.
-func cleanGlobPathWindows(path string) string {
-	vollen := volumeNameLen(path)
-	switch {
-	case path == "":
-		return "."
-	case vollen+1 == len(path) && os.IsPathSeparator(path[len(path)-1]): // /, \, C:\ and C:/
-		// do nothing to the path
-		return path
-	case vollen == len(path) && len(path) == 2: // C:
-		return path + "." // convert C: into C:.
-	default:
-		return path[0 : len(path)-1] // chop off trailing separator
-	}
 }
 
 // glob searches for files matching pattern in the directory dir
@@ -331,5 +305,5 @@ func glob(dir, pattern string, matches []string) (m []string, e error) {
 // recognized by Match.
 func hasMeta(path string) bool {
 	// TODO(niemeyer): Should other magic characters be added here?
-	return strings.ContainsAny(path, "*?[")
+	return strings.IndexAny(path, "*?[") >= 0
 }

@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -10,7 +10,6 @@
 package syscall
 
 import (
-	"io"
 	"sync"
 )
 
@@ -253,15 +252,15 @@ func (f *naclFile) seek(off int64, whence int) (int64, error) {
 
 func (f *naclFile) prw(b []byte, offset int64, rw func([]byte) (int, error)) (int, error) {
 	// NaCl has no pread; simulate with seek and hope for no races.
-	old, err := f.seek(0, io.SeekCurrent)
+	old, err := f.seek(0, 1)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := f.seek(offset, io.SeekStart); err != nil {
+	if _, err := f.seek(offset, 0); err != nil {
 		return 0, err
 	}
 	n, err := rw(b)
-	f.seek(old, io.SeekStart)
+	f.seek(old, 0)
 	return n, err
 }
 

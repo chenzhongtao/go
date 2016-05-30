@@ -121,7 +121,7 @@ const (
 	FilterSocket        FilterType = iota // for Socket
 	FilterConnect                         // for Connect or ConnectEx
 	FilterListen                          // for Listen
-	FilterAccept                          // for Accept, Accept4 or AcceptEx
+	FilterAccept                          // for Accept or Accept4
 	FilterGetsockoptInt                   // for GetsockoptInt
 	FilterClose                           // for Close or Closesocket
 )

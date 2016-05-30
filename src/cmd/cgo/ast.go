@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors. All rights reserved.
+// Copyright 2009 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -40,7 +40,7 @@ func sourceLine(n ast.Node) int {
 }
 
 // ReadGo populates f with information learned from reading the
-// Go source file with the given file name. It gathers the C preamble
+// Go source file with the given file name.  It gathers the C preamble
 // attached to the import "C" comment, a list of references to C.xxx,
 // a list of exported functions, and the actual AST, to be rewritten and
 // printed.
@@ -73,7 +73,7 @@ func (f *File) ReadGo(name string) {
 		}
 		for _, spec := range d.Specs {
 			s, ok := spec.(*ast.ImportSpec)
-			if !ok || s.Path.Value != `"C"` {
+			if !ok || string(s.Path.Value) != `"C"` {
 				continue
 			}
 			sawC = true
@@ -106,7 +106,7 @@ func (f *File) ReadGo(name string) {
 		ws := 0
 		for _, spec := range d.Specs {
 			s, ok := spec.(*ast.ImportSpec)
-			if !ok || s.Path.Value != `"C"` {
+			if !ok || string(s.Path.Value) != `"C"` {
 				d.Specs[ws] = spec
 				ws++
 			}
@@ -147,7 +147,7 @@ func commentText(g *ast.CommentGroup) string {
 	}
 	var pieces []string
 	for _, com := range g.List {
-		c := com.Text
+		c := string(com.Text)
 		// Remove comment markers.
 		// The parser has given us exactly the comment text.
 		switch c[1] {
@@ -242,11 +242,11 @@ func (f *File) saveExport(x interface{}, context string) {
 		return
 	}
 	for _, c := range n.Doc.List {
-		if !strings.HasPrefix(c.Text, "//export ") {
+		if !strings.HasPrefix(string(c.Text), "//export ") {
 			continue
 		}
 
-		name := strings.TrimSpace(c.Text[9:])
+		name := strings.TrimSpace(string(c.Text[9:]))
 		if name == "" {
 			error_(c.Pos(), "export missing name")
 		}
@@ -447,11 +447,7 @@ func (f *File) walk(x interface{}, context string, visit func(*File, interface{}
 	case *ast.ImportSpec:
 	case *ast.ValueSpec:
 		f.walk(&n.Type, "type", visit)
-		if len(n.Names) == 2 && len(n.Values) == 1 {
-			f.walk(&n.Values[0], "as2", visit)
-		} else {
-			f.walk(n.Values, "expr", visit)
-		}
+		f.walk(n.Values, "expr", visit)
 	case *ast.TypeSpec:
 		f.walk(&n.Type, "type", visit)
 

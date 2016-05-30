@@ -33,14 +33,7 @@ type hchan struct {
 	recvx    uint   // receive index
 	recvq    waitq  // list of recv waiters
 	sendq    waitq  // list of send waiters
-
-	// lock protects all fields in hchan, as well as several
-	// fields in sudogs blocked on this channel.
-	//
-	// Do not change another G's status while holding this lock
-	// (in particular, do not ready a G), as this can deadlock
-	// with stack shrinking.
-	lock mutex
+	lock     mutex
 }
 
 type waitq struct {
@@ -63,8 +56,8 @@ func makechan(t *chantype, size int64) *hchan {
 	if hchanSize%maxAlign != 0 || elem.align > maxAlign {
 		throw("makechan: bad alignment")
 	}
-	if size < 0 || int64(uintptr(size)) != size || (elem.size > 0 && uintptr(size) > (_MaxMem-hchanSize)/elem.size) {
-		panic(plainError("makechan: size out of range"))
+	if size < 0 || int64(uintptr(size)) != size || (elem.size > 0 && uintptr(size) > (_MaxMem-hchanSize)/uintptr(elem.size)) {
+		panic("makechan: size out of range")
 	}
 
 	var c *hchan
@@ -74,7 +67,7 @@ func makechan(t *chantype, size int64) *hchan {
 		// buf points into the same allocation, elemtype is persistent.
 		// SudoG's are referenced from their owning thread so they can't be collected.
 		// TODO(dvyukov,rlh): Rethink when collector can move allocated objects.
-		c = (*hchan)(mallocgc(hchanSize+uintptr(size)*elem.size, nil, true))
+		c = (*hchan)(mallocgc(hchanSize+uintptr(size)*uintptr(elem.size), nil, flagNoScan))
 		if size > 0 && elem.size != 0 {
 			c.buf = add(unsafe.Pointer(c), hchanSize)
 		} else {
@@ -84,7 +77,7 @@ func makechan(t *chantype, size int64) *hchan {
 		}
 	} else {
 		c = new(hchan)
-		c.buf = newarray(elem, int(size))
+		c.buf = newarray(elem, uintptr(size))
 	}
 	c.elemsize = uint16(elem.size)
 	c.elemtype = elem
@@ -171,7 +164,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 
 	if c.closed != 0 {
 		unlock(&c.lock)
-		panic(plainError("send on closed channel"))
+		panic("send on closed channel")
 	}
 
 	if sg := c.recvq.dequeue(); sg != nil {
@@ -182,7 +175,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	}
 
 	if c.qcount < c.dataqsiz {
-		// Space is available in the channel buffer. Enqueue the element to send.
+		// Space is available in the channel buffer.  Enqueue the element to send.
 		qp := chanbuf(c, c.sendx)
 		if raceenabled {
 			raceacquire(qp)
@@ -203,20 +196,17 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 		return false
 	}
 
-	// Block on the channel. Some receiver will complete our operation for us.
+	// Block on the channel.  Some receiver will complete our operation for us.
 	gp := getg()
 	mysg := acquireSudog()
 	mysg.releasetime = 0
 	if t0 != 0 {
 		mysg.releasetime = -1
 	}
-	// No stack splits between assigning elem and enqueuing mysg
-	// on gp.waiting where copystack can find it.
 	mysg.elem = ep
 	mysg.waitlink = nil
 	mysg.g = gp
 	mysg.selectdone = nil
-	mysg.c = c
 	gp.waiting = mysg
 	gp.param = nil
 	c.sendq.enqueue(mysg)
@@ -231,13 +221,12 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 		if c.closed == 0 {
 			throw("chansend: spurious wakeup")
 		}
-		panic(plainError("send on closed channel"))
+		panic("send on closed channel")
 	}
 	gp.param = nil
 	if mysg.releasetime > 0 {
-		blockevent(mysg.releasetime-t0, 2)
+		blockevent(int64(mysg.releasetime)-t0, 2)
 	}
-	mysg.c = nil
 	releaseSudog(mysg)
 	return true
 }
@@ -254,7 +243,7 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 			racesync(c, sg)
 		} else {
 			// Pretend we go through the buffer, even though
-			// we copy directly. Note that we need to increment
+			// we copy directly.  Note that we need to increment
 			// the head/tail locations only when raceenabled.
 			qp := chanbuf(c, c.recvx)
 			raceacquire(qp)
@@ -268,12 +257,12 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 			c.sendx = c.recvx // c.sendx = (c.sendx+1) % c.dataqsiz
 		}
 	}
+	unlockf()
 	if sg.elem != nil {
 		sendDirect(c.elemtype, sg, ep)
 		sg.elem = nil
 	}
 	gp := sg.g
-	unlockf()
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
@@ -302,13 +291,13 @@ func sendDirect(t *_type, sg *sudog, src unsafe.Pointer) {
 
 func closechan(c *hchan) {
 	if c == nil {
-		panic(plainError("close of nil channel"))
+		panic("close of nil channel")
 	}
 
 	lock(&c.lock)
 	if c.closed != 0 {
 		unlock(&c.lock)
-		panic(plainError("close of closed channel"))
+		panic("close of closed channel")
 	}
 
 	if raceenabled {
@@ -318,8 +307,6 @@ func closechan(c *hchan) {
 	}
 
 	c.closed = 1
-
-	var glist *g
 
 	// release all readers
 	for {
@@ -339,8 +326,7 @@ func closechan(c *hchan) {
 		if raceenabled {
 			raceacquireg(gp, unsafe.Pointer(c))
 		}
-		gp.schedlink.set(glist)
-		glist = gp
+		goready(gp, 3)
 	}
 
 	// release all writers (they will panic)
@@ -358,18 +344,9 @@ func closechan(c *hchan) {
 		if raceenabled {
 			raceacquireg(gp, unsafe.Pointer(c))
 		}
-		gp.schedlink.set(glist)
-		glist = gp
-	}
-	unlock(&c.lock)
-
-	// Ready all Gs now that we've dropped the channel lock.
-	for glist != nil {
-		gp := glist
-		glist = glist.schedlink.ptr()
-		gp.schedlink = 0
 		goready(gp, 3)
 	}
+	unlock(&c.lock)
 }
 
 // entry points for <- c from compiled code
@@ -443,8 +420,8 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 	}
 
 	if sg := c.sendq.dequeue(); sg != nil {
-		// Found a waiting sender. If buffer is size 0, receive value
-		// directly from sender. Otherwise, receive from head of queue
+		// Found a waiting sender.  If buffer is size 0, receive value
+		// directly from sender.  Otherwise, recieve from head of queue
 		// and add sender's value to the tail of the queue (both map to
 		// the same buffer slot because the queue is full).
 		recv(c, sg, ep, func() { unlock(&c.lock) })
@@ -483,14 +460,11 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 	if t0 != 0 {
 		mysg.releasetime = -1
 	}
-	// No stack splits between assigning elem and enqueuing mysg
-	// on gp.waiting where copystack can find it.
 	mysg.elem = ep
 	mysg.waitlink = nil
 	gp.waiting = mysg
 	mysg.g = gp
 	mysg.selectdone = nil
-	mysg.c = c
 	gp.param = nil
 	c.recvq.enqueue(mysg)
 	goparkunlock(&c.lock, "chan receive", traceEvGoBlockRecv, 3)
@@ -505,7 +479,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 	}
 	closed := gp.param == nil
 	gp.param = nil
-	mysg.c = nil
 	releaseSudog(mysg)
 	return true, !closed
 }
@@ -528,6 +501,7 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 		if raceenabled {
 			racesync(c, sg)
 		}
+		unlockf()
 		if ep != nil {
 			// copy data from sender
 			// ep points to our own stack or heap, so nothing
@@ -535,9 +509,9 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 			typedmemmove(c.elemtype, ep, sg.elem)
 		}
 	} else {
-		// Queue is full. Take the item at the
-		// head of the queue. Make the sender enqueue
-		// its item at the tail of the queue. Since the
+		// Queue is full.  Take the item at the
+		// head of the queue.  Make the sender enqueue
+		// its item at the tail of the queue.  Since the
 		// queue is full, those are both the same slot.
 		qp := chanbuf(c, c.recvx)
 		if raceenabled {
@@ -557,10 +531,10 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 			c.recvx = 0
 		}
 		c.sendx = c.recvx // c.sendx = (c.sendx+1) % c.dataqsiz
+		unlockf()
 	}
 	sg.elem = nil
 	gp := sg.g
-	unlockf()
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()

@@ -6,7 +6,6 @@ package net
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"internal/testenv"
 	"runtime"
@@ -15,7 +14,7 @@ import (
 	"time"
 )
 
-func lookupLocalhost(ctx context.Context, fn func(context.Context, string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+func lookupLocalhost(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
 	switch host {
 	case "localhost":
 		return []IPAddr{
@@ -23,7 +22,7 @@ func lookupLocalhost(ctx context.Context, fn func(context.Context, string) ([]IP
 			{IP: IPv6loopback},
 		}, nil
 	default:
-		return fn(ctx, host)
+		return fn(host)
 	}
 }
 
@@ -59,10 +58,9 @@ var lookupGoogleSRVTests = []struct {
 }
 
 func TestLookupGoogleSRV(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -70,7 +68,6 @@ func TestLookupGoogleSRV(t *testing.T) {
 	for _, tt := range lookupGoogleSRVTests {
 		cname, srvs, err := LookupSRV(tt.service, tt.proto, tt.name)
 		if err != nil {
-			testenv.SkipFlakyNet(t)
 			t.Fatal(err)
 		}
 		if len(srvs) == 0 {
@@ -95,10 +92,9 @@ var lookupGmailMXTests = []struct {
 }
 
 func TestLookupGmailMX(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -127,10 +123,9 @@ var lookupGmailNSTests = []struct {
 }
 
 func TestLookupGmailNS(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -138,7 +133,6 @@ func TestLookupGmailNS(t *testing.T) {
 	for _, tt := range lookupGmailNSTests {
 		nss, err := LookupNS(tt.name)
 		if err != nil {
-			testenv.SkipFlakyNet(t)
 			t.Fatal(err)
 		}
 		if len(nss) == 0 {
@@ -160,10 +154,9 @@ var lookupGmailTXTTests = []struct {
 }
 
 func TestLookupGmailTXT(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -195,10 +188,9 @@ var lookupGooglePublicDNSAddrTests = []struct {
 }
 
 func TestLookupGooglePublicDNSAddr(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !supportsIPv6 || !*testIPv4 || !*testIPv6 {
 		t.Skip("both IPv4 and IPv6 are required")
 	}
@@ -251,10 +243,9 @@ var lookupIANACNAMETests = []struct {
 }
 
 func TestLookupIANACNAME(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -278,10 +269,9 @@ var lookupGoogleHostTests = []struct {
 }
 
 func TestLookupGoogleHost(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -310,10 +300,9 @@ var lookupGoogleIPTests = []struct {
 }
 
 func TestLookupGoogleIP(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -371,38 +360,22 @@ func TestReverseAddress(t *testing.T) {
 	}
 }
 
-func TestDNSFlood(t *testing.T) {
+func TestLookupIPDeadline(t *testing.T) {
 	if !*testDNSFlood {
 		t.Skip("test disabled; use -dnsflood to enable")
 	}
 
-	var N = 5000
-	if runtime.GOOS == "darwin" {
-		// On Darwin this test consumes kernel threads much
-		// than other platforms for some reason.
-		// When we monitor the number of allocated Ms by
-		// observing on runtime.newm calls, we can see that it
-		// easily reaches the per process ceiling
-		// kern.num_threads when CGO_ENABLED=1 and
-		// GODEBUG=netdns=go.
-		N = 500
-	}
-
+	const N = 5000
 	const timeout = 3 * time.Second
-	ctxHalfTimeout, cancel := context.WithTimeout(context.Background(), timeout/2)
-	defer cancel()
-	ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
 	c := make(chan error, 2*N)
 	for i := 0; i < N; i++ {
 		name := fmt.Sprintf("%d.net-test.golang.org", i)
 		go func() {
-			_, err := lookupIPContext(ctxHalfTimeout, name)
+			_, err := lookupIPDeadline(name, time.Now().Add(timeout/2))
 			c <- err
 		}()
 		go func() {
-			_, err := lookupIPContext(ctxTimeout, name)
+			_, err := lookupIPDeadline(name, time.Now().Add(timeout))
 			c <- err
 		}()
 	}
@@ -490,10 +463,9 @@ func TestLookupDotsWithLocalSource(t *testing.T) {
 }
 
 func TestLookupDotsWithRemoteSource(t *testing.T) {
-	if testenv.Builder() == "" {
-		testenv.MustHaveExternalNetwork(t)
+	if testing.Short() && testenv.Builder() == "" || !*testExternal {
+		t.Skip("avoid external network")
 	}
-
 	if !supportsIPv4 || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
@@ -511,7 +483,6 @@ func TestLookupDotsWithRemoteSource(t *testing.T) {
 func testDots(t *testing.T, mode string) {
 	names, err := LookupAddr("8.8.8.8") // Google dns server
 	if err != nil {
-		testenv.SkipFlakyNet(t)
 		t.Errorf("LookupAddr(8.8.8.8): %v (mode=%v)", err, mode)
 	} else {
 		for _, name := range names {
@@ -523,16 +494,12 @@ func testDots(t *testing.T, mode string) {
 	}
 
 	cname, err := LookupCNAME("www.mit.edu")
-	if err != nil {
-		testenv.SkipFlakyNet(t)
-		t.Errorf("LookupCNAME(www.mit.edu, mode=%v): %v", mode, err)
-	} else if !strings.HasSuffix(cname, ".") {
-		t.Errorf("LookupCNAME(www.mit.edu) = %v, want cname ending in . with trailing dot (mode=%v)", cname, mode)
+	if err != nil || !strings.HasSuffix(cname, ".") {
+		t.Errorf("LookupCNAME(www.mit.edu) = %v, %v, want cname ending in . with trailing dot (mode=%v)", cname, err, mode)
 	}
 
 	mxs, err := LookupMX("google.com")
 	if err != nil {
-		testenv.SkipFlakyNet(t)
 		t.Errorf("LookupMX(google.com): %v (mode=%v)", err, mode)
 	} else {
 		for _, mx := range mxs {
@@ -545,7 +512,6 @@ func testDots(t *testing.T, mode string) {
 
 	nss, err := LookupNS("google.com")
 	if err != nil {
-		testenv.SkipFlakyNet(t)
 		t.Errorf("LookupNS(google.com): %v (mode=%v)", err, mode)
 	} else {
 		for _, ns := range nss {
@@ -558,7 +524,6 @@ func testDots(t *testing.T, mode string) {
 
 	cname, srvs, err := LookupSRV("xmpp-server", "tcp", "google.com")
 	if err != nil {
-		testenv.SkipFlakyNet(t)
 		t.Errorf("LookupSRV(xmpp-server, tcp, google.com): %v (mode=%v)", err, mode)
 	} else {
 		if !strings.HasSuffix(cname, ".google.com.") {
@@ -609,60 +574,61 @@ func srvString(srvs []*SRV) string {
 	return buf.String()
 }
 
+var lookupPortTests = []struct {
+	network string
+	name    string
+	port    int
+	ok      bool
+}{
+	{"tcp", "0", 0, true},
+	{"tcp", "echo", 7, true},
+	{"tcp", "discard", 9, true},
+	{"tcp", "systat", 11, true},
+	{"tcp", "daytime", 13, true},
+	{"tcp", "chargen", 19, true},
+	{"tcp", "ftp-data", 20, true},
+	{"tcp", "ftp", 21, true},
+	{"tcp", "telnet", 23, true},
+	{"tcp", "smtp", 25, true},
+	{"tcp", "time", 37, true},
+	{"tcp", "domain", 53, true},
+	{"tcp", "finger", 79, true},
+	{"tcp", "42", 42, true},
+
+	{"udp", "0", 0, true},
+	{"udp", "echo", 7, true},
+	{"udp", "tftp", 69, true},
+	{"udp", "bootpc", 68, true},
+	{"udp", "bootps", 67, true},
+	{"udp", "domain", 53, true},
+	{"udp", "ntp", 123, true},
+	{"udp", "snmp", 161, true},
+	{"udp", "syslog", 514, true},
+	{"udp", "42", 42, true},
+
+	{"--badnet--", "zzz", 0, false},
+	{"tcp", "--badport--", 0, false},
+	{"tcp", "-1", 0, false},
+	{"tcp", "65536", 0, false},
+	{"udp", "-1", 0, false},
+	{"udp", "65536", 0, false},
+
+	// Issue 13610: LookupPort("tcp", "")
+	{"tcp", "", 0, true},
+	{"tcp6", "", 0, true},
+	{"tcp4", "", 0, true},
+	{"udp", "", 0, true},
+}
+
 func TestLookupPort(t *testing.T) {
-	// See http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml
-	//
-	// Please be careful about adding new mappings for testings.
-	// There are platforms having incomplete mappings for
-	// restricted resource access and security reasons.
-	type test struct {
-		network string
-		name    string
-		port    int
-		ok      bool
-	}
-	var tests = []test{
-		{"tcp", "0", 0, true},
-		{"udp", "0", 0, true},
-		{"udp", "domain", 53, true},
-
-		{"--badnet--", "zzz", 0, false},
-		{"tcp", "--badport--", 0, false},
-		{"tcp", "-1", 0, false},
-		{"tcp", "65536", 0, false},
-		{"udp", "-1", 0, false},
-		{"udp", "65536", 0, false},
-		{"tcp", "123456789", 0, false},
-
-		// Issue 13610: LookupPort("tcp", "")
-		{"tcp", "", 0, true},
-		{"tcp4", "", 0, true},
-		{"tcp6", "", 0, true},
-		{"udp", "", 0, true},
-		{"udp4", "", 0, true},
-		{"udp6", "", 0, true},
-	}
-
 	switch runtime.GOOS {
 	case "nacl":
 		t.Skipf("not supported on %s", runtime.GOOS)
-	case "android":
-		if netGo {
-			t.Skipf("not supported on %s without cgo; see golang.org/issues/14576", runtime.GOOS)
-		}
-	default:
-		tests = append(tests, test{"tcp", "http", 80, true})
 	}
 
-	for _, tt := range tests {
-		port, err := LookupPort(tt.network, tt.name)
-		if port != tt.port || (err == nil) != tt.ok {
-			t.Errorf("LookupPort(%q, %q) = %d, %v; want %d, error=%t", tt.network, tt.name, port, err, tt.port, !tt.ok)
-		}
-		if err != nil {
-			if perr := parseLookupPortError(err); perr != nil {
-				t.Error(perr)
-			}
+	for _, tt := range lookupPortTests {
+		if port, err := LookupPort(tt.network, tt.name); port != tt.port || (err == nil) != tt.ok {
+			t.Errorf("LookupPort(%q, %q) = %d, %v; want %d", tt.network, tt.name, port, err, tt.port)
 		}
 	}
 }

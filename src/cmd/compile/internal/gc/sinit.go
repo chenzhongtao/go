@@ -5,6 +5,7 @@
 package gc
 
 import (
+	"cmd/internal/obj"
 	"fmt"
 )
 
@@ -15,15 +16,6 @@ const (
 	InitPending    = 2
 )
 
-type InitEntry struct {
-	Xoffset int64 // struct, array only
-	Expr    *Node // bytes of run-time computed expressions
-}
-
-type InitPlan struct {
-	E []InitEntry
-}
-
 var (
 	initlist  []*Node
 	initplans map[*Node]*InitPlan
@@ -32,20 +24,20 @@ var (
 
 // init1 walks the AST starting at n, and accumulates in out
 // the list of definitions needing init code in dependency order.
-func init1(n *Node, out *[]*Node) {
+func init1(n *Node, out **NodeList) {
 	if n == nil {
 		return
 	}
 	init1(n.Left, out)
 	init1(n.Right, out)
-	for _, n1 := range n.List.Slice() {
-		init1(n1, out)
+	for l := n.List; l != nil; l = l.Next {
+		init1(l.N, out)
 	}
 
 	if n.Left != nil && n.Type != nil && n.Left.Op == OTYPE && n.Class == PFUNC {
 		// Methods called as Type.Method(receiver, ...).
 		// Definitions for method expressions are stored in type->nname.
-		init1(n.Type.Nname(), out)
+		init1(n.Type.Nname, out)
 	}
 
 	if n.Op != ONAME {
@@ -128,7 +120,7 @@ func init1(n *Node, out *[]*Node) {
 				if Debug['%'] != 0 {
 					Dump("nonstatic", defn)
 				}
-				*out = append(*out, defn)
+				*out = list(*out, defn)
 			}
 
 		case OAS2FUNC, OAS2MAPR, OAS2DOTTYPE, OAS2RECV:
@@ -136,13 +128,13 @@ func init1(n *Node, out *[]*Node) {
 				break
 			}
 			defn.Initorder = InitPending
-			for _, n2 := range defn.Rlist.Slice() {
-				init1(n2, out)
+			for l := defn.Rlist; l != nil; l = l.Next {
+				init1(l.N, out)
 			}
 			if Debug['%'] != 0 {
 				Dump("nonstatic", defn)
 			}
-			*out = append(*out, defn)
+			*out = list(*out, defn)
 			defn.Initorder = InitDone
 		}
 	}
@@ -195,13 +187,13 @@ func foundinitloop(node, visited *Node) {
 }
 
 // recurse over n, doing init1 everywhere.
-func init2(n *Node, out *[]*Node) {
+func init2(n *Node, out **NodeList) {
 	if n == nil || n.Initorder == InitDone {
 		return
 	}
 
-	if n.Op == ONAME && n.Ninit.Len() != 0 {
-		Fatalf("name %v with ninit: %v\n", n.Sym, Nconv(n, FmtSign))
+	if n.Op == ONAME && n.Ninit != nil {
+		Fatalf("name %v with ninit: %v\n", n.Sym, Nconv(n, obj.FmtSign))
 	}
 
 	init1(n, out)
@@ -216,26 +208,28 @@ func init2(n *Node, out *[]*Node) {
 		init2list(n.Func.Closure.Nbody, out)
 	}
 	if n.Op == ODOTMETH || n.Op == OCALLPART {
-		init2(n.Type.Nname(), out)
+		init2(n.Type.Nname, out)
 	}
 }
 
-func init2list(l Nodes, out *[]*Node) {
-	for _, n := range l.Slice() {
-		init2(n, out)
+func init2list(l *NodeList, out **NodeList) {
+	for ; l != nil; l = l.Next {
+		init2(l.N, out)
 	}
 }
 
-func initreorder(l []*Node, out *[]*Node) {
+func initreorder(l *NodeList, out **NodeList) {
 	var n *Node
-	for _, n = range l {
+
+	for ; l != nil; l = l.Next {
+		n = l.N
 		switch n.Op {
 		case ODCLFUNC, ODCLCONST, ODCLTYPE:
 			continue
 		}
 
-		initreorder(n.Ninit.Slice(), out)
-		n.Ninit.Set(nil)
+		initreorder(n.Ninit, out)
+		n.Ninit = nil
 		init1(n, out)
 	}
 }
@@ -243,19 +237,19 @@ func initreorder(l []*Node, out *[]*Node) {
 // initfix computes initialization order for a list l of top-level
 // declarations and outputs the corresponding list of statements
 // to include in the init() function body.
-func initfix(l []*Node) []*Node {
-	var lout []*Node
+func initfix(l *NodeList) *NodeList {
+	var lout *NodeList
 	initplans = make(map[*Node]*InitPlan)
-	lno := lineno
+	lno := int(lineno)
 	initreorder(l, &lout)
-	lineno = lno
+	lineno = int32(lno)
 	initplans = nil
 	return lout
 }
 
 // compilation of top-level (static) assignments
 // into DATA statements if at all possible.
-func staticinit(n *Node, out *[]*Node) bool {
+func staticinit(n *Node, out **NodeList) bool {
 	if n.Op != ONAME || n.Class != PEXTERN || n.Name.Defn == nil || n.Name.Defn.Op != OAS {
 		Fatalf("staticinit")
 	}
@@ -268,7 +262,7 @@ func staticinit(n *Node, out *[]*Node) bool {
 
 // like staticassign but we are copying an already
 // initialized value r.
-func staticcopy(l *Node, r *Node, out *[]*Node) bool {
+func staticcopy(l *Node, r *Node, out **NodeList) bool {
 	if r.Op != ONAME {
 		return false
 	}
@@ -297,7 +291,7 @@ func staticcopy(l *Node, r *Node, out *[]*Node) bool {
 		if staticcopy(l, r, out) {
 			return true
 		}
-		*out = append(*out, Nod(OAS, l, r))
+		*out = list(*out, Nod(OAS, l, r))
 		return true
 
 	case OLITERAL:
@@ -328,7 +322,7 @@ func staticcopy(l *Node, r *Node, out *[]*Node) bool {
 		}
 
 	case OARRAYLIT:
-		if r.Type.IsSlice() {
+		if Isslice(r.Type) {
 			// copy slice
 			a := inittemps[r]
 
@@ -342,6 +336,8 @@ func staticcopy(l *Node, r *Node, out *[]*Node) bool {
 			return true
 		}
 		fallthrough
+
+		// fall through
 	case OSTRUCTLIT:
 		p := initplans[r]
 
@@ -366,7 +362,7 @@ func staticcopy(l *Node, r *Node, out *[]*Node) bool {
 					rr.Type = ll.Type
 					rr.Xoffset += e.Xoffset
 					setlineno(rr)
-					*out = append(*out, Nod(OAS, ll, rr))
+					*out = list(*out, Nod(OAS, ll, rr))
 				}
 			}
 		}
@@ -377,7 +373,7 @@ func staticcopy(l *Node, r *Node, out *[]*Node) bool {
 	return false
 }
 
-func staticassign(l *Node, r *Node, out *[]*Node) bool {
+func staticassign(l *Node, r *Node, out **NodeList) bool {
 	for r.Op == OCONVNOP {
 		r = r.Left
 	}
@@ -414,7 +410,7 @@ func staticassign(l *Node, r *Node, out *[]*Node) bool {
 
 			// Init underlying literal.
 			if !staticassign(a, r.Left, out) {
-				*out = append(*out, Nod(OAS, a, r.Left))
+				*out = list(*out, Nod(OAS, a, r.Left))
 			}
 			return true
 		}
@@ -429,10 +425,12 @@ func staticassign(l *Node, r *Node, out *[]*Node) bool {
 
 	case OARRAYLIT:
 		initplan(r)
-		if r.Type.IsSlice() {
+		if Isslice(r.Type) {
 			// Init slice.
-			bound := r.Right.Int64()
-			ta := typArray(r.Type.Elem(), bound)
+			ta := typ(TARRAY)
+
+			ta.Type = r.Type.Type
+			ta.Bound = Mpgetfix(r.Right.Val().U.(*Mpint))
 			a := staticname(ta, 1)
 			inittemps[r] = a
 			n := *l
@@ -465,7 +463,7 @@ func staticassign(l *Node, r *Node, out *[]*Node) bool {
 				*a = n
 				a.Orig = a // completely separate copy
 				if !staticassign(a, e.Expr, out) {
-					*out = append(*out, Nod(OAS, a, e.Expr))
+					*out = list(*out, Nod(OAS, a, e.Expr))
 				}
 			}
 		}
@@ -477,17 +475,12 @@ func staticassign(l *Node, r *Node, out *[]*Node) bool {
 		break
 
 	case OCLOSURE:
-		if hasemptycvars(r) {
-			if Debug_closure > 0 {
-				Warnl(r.Lineno, "closure converted to global")
-			}
+		if r.Func.Cvars == nil {
 			// Closures with no captured variables are globals,
 			// so the assignment can be done at link time.
 			n := *l
 			gdata(&n, r.Func.Closure.Func.Nname, Widthptr)
 			return true
-		} else {
-			closuredebugruntimecheck(r)
 		}
 	}
 
@@ -501,7 +494,7 @@ func staticassign(l *Node, r *Node, out *[]*Node) bool {
 // data statements for the constant
 // part of the composite literal.
 func staticname(t *Type, ctxt int) *Node {
-	n := newname(LookupN("statictmp_", statuniqgen))
+	n := newname(Lookupf("statictmp_%.4d", statuniqgen))
 	statuniqgen++
 	if ctxt == 0 {
 		n.Name.Readonly = true
@@ -511,101 +504,91 @@ func staticname(t *Type, ctxt int) *Node {
 }
 
 func isliteral(n *Node) bool {
-	// Treat nils as zeros rather than literals.
-	return n.Op == OLITERAL && n.Val().Ctype() != CTNIL
-}
-
-func (n *Node) isSimpleName() bool {
-	return n.Op == ONAME && n.Addable && n.Class != PAUTOHEAP
-}
-
-func litas(l *Node, r *Node, init *Nodes) {
-	a := Nod(OAS, l, r)
-	a = typecheck(a, Etop)
-	a = walkexpr(a, init)
-	init.Append(a)
-}
-
-// initGenType is a bitmap indicating the types of generation that will occur for a static value.
-type initGenType uint8
-
-const (
-	initDynamic initGenType = 1 << iota // contains some dynamic values, for which init code will be generated
-	initConst                           // contains some constant values, which may be written into data symbols
-)
-
-func getdyn(n *Node, top int) initGenType {
-	switch n.Op {
-	default:
-		if isliteral(n) {
-			return initConst
-		}
-		return initDynamic
-
-	case OARRAYLIT:
-		if top == 0 && n.Type.IsSlice() {
-			return initDynamic
-		}
-
-	case OSTRUCTLIT:
-	}
-
-	var mode initGenType
-	for _, n1 := range n.List.Slice() {
-		value := n1.Right
-		mode |= getdyn(value, 0)
-		if mode == initDynamic|initConst {
-			break
+	if n.Op == OLITERAL {
+		if n.Val().Ctype() != CTNIL {
+			return true
 		}
 	}
-	return mode
+	return false
 }
 
-// isStaticCompositeLiteral reports whether n is a compile-time constant.
-func isStaticCompositeLiteral(n *Node) bool {
-	switch n.Op {
-	case OARRAYLIT:
-		if n.Type.IsSlice() {
-			return false
-		}
-	case OSTRUCTLIT:
-	case OLITERAL:
-		return true
-	default:
+func simplename(n *Node) bool {
+	if n.Op != ONAME {
 		return false
 	}
-	for _, r := range n.List.Slice() {
-		if r.Op != OKEY {
-			Fatalf("isStaticCompositeLiteral: rhs not OKEY: %v", r)
-		}
-		index := r.Left
-		if n.Op == OARRAYLIT && index.Op != OLITERAL {
-			return false
-		}
-		value := r.Right
-		if !isStaticCompositeLiteral(value) {
-			return false
-		}
+	if !n.Addable {
+		return false
+	}
+	if n.Class&PHEAP != 0 {
+		return false
+	}
+	if n.Class == PPARAMREF {
+		return false
 	}
 	return true
 }
 
-func structlit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
-	for _, r := range n.List.Slice() {
+func litas(l *Node, r *Node, init **NodeList) {
+	a := Nod(OAS, l, r)
+	typecheck(&a, Etop)
+	walkexpr(&a, init)
+	*init = list(*init, a)
+}
+
+const (
+	MODEDYNAM = 1
+	MODECONST = 2
+)
+
+func getdyn(n *Node, top int) int {
+	mode := 0
+	switch n.Op {
+	default:
+		if isliteral(n) {
+			return MODECONST
+		}
+		return MODEDYNAM
+
+	case OARRAYLIT:
+		if top == 0 && n.Type.Bound < 0 {
+			return MODEDYNAM
+		}
+		fallthrough
+
+	case OSTRUCTLIT:
+		break
+	}
+
+	for nl := n.List; nl != nil; nl = nl.Next {
+		value := nl.N.Right
+		mode |= getdyn(value, 0)
+		if mode == MODEDYNAM|MODECONST {
+			break
+		}
+	}
+
+	return mode
+}
+
+func structlit(ctxt int, pass int, n *Node, var_ *Node, init **NodeList) {
+	for nl := n.List; nl != nil; nl = nl.Next {
+		r := nl.N
 		if r.Op != OKEY {
 			Fatalf("structlit: rhs not OKEY: %v", r)
 		}
 		index := r.Left
 		value := r.Right
 
+		var a *Node
+
 		switch value.Op {
 		case OARRAYLIT:
-			if value.Type.IsSlice() {
+			if value.Type.Bound < 0 {
 				if pass == 1 && ctxt != 0 {
-					a := NodSym(ODOT, var_, index.Sym)
+					a = Nod(ODOT, var_, newname(index.Sym))
 					slicelit(ctxt, value, a, init)
 				} else if pass == 2 && ctxt == 0 {
-					a := NodSym(ODOT, var_, index.Sym)
+					a = Nod(ODOT, var_, newname(index.Sym))
 					slicelit(ctxt, value, a, init)
 				} else if pass == 3 {
 					break
@@ -613,12 +596,12 @@ func structlit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
 				continue
 			}
 
-			a := NodSym(ODOT, var_, index.Sym)
+			a = Nod(ODOT, var_, newname(index.Sym))
 			arraylit(ctxt, pass, value, a, init)
 			continue
 
 		case OSTRUCTLIT:
-			a := NodSym(ODOT, var_, index.Sym)
+			a = Nod(ODOT, var_, newname(index.Sym))
 			structlit(ctxt, pass, value, a, init)
 			continue
 		}
@@ -633,41 +616,44 @@ func structlit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
 
 		// build list of var.field = expr
 		setlineno(value)
-		a := NodSym(ODOT, var_, index.Sym)
+		a = Nod(ODOT, var_, newname(index.Sym))
 
 		a = Nod(OAS, a, value)
-		a = typecheck(a, Etop)
+		typecheck(&a, Etop)
 		if pass == 1 {
-			a = walkexpr(a, init) // add any assignments in r to top
+			walkexpr(&a, init) // add any assignments in r to top
 			if a.Op != OAS {
 				Fatalf("structlit: not as")
 			}
 			a.Dodata = 2
 		} else {
-			a = orderstmtinplace(a)
-			a = walkstmt(a)
+			orderstmtinplace(&a)
+			walkstmt(&a)
 		}
 
-		init.Append(a)
+		*init = list(*init, a)
 	}
 }
 
-func arraylit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
-	for _, r := range n.List.Slice() {
+func arraylit(ctxt int, pass int, n *Node, var_ *Node, init **NodeList) {
+	for l := n.List; l != nil; l = l.Next {
+		r := l.N
 		if r.Op != OKEY {
 			Fatalf("arraylit: rhs not OKEY: %v", r)
 		}
 		index := r.Left
 		value := r.Right
 
+		var a *Node
+
 		switch value.Op {
 		case OARRAYLIT:
-			if value.Type.IsSlice() {
+			if value.Type.Bound < 0 {
 				if pass == 1 && ctxt != 0 {
-					a := Nod(OINDEX, var_, index)
+					a = Nod(OINDEX, var_, index)
 					slicelit(ctxt, value, a, init)
 				} else if pass == 2 && ctxt == 0 {
-					a := Nod(OINDEX, var_, index)
+					a = Nod(OINDEX, var_, index)
 					slicelit(ctxt, value, a, init)
 				} else if pass == 3 {
 					break
@@ -675,12 +661,12 @@ func arraylit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
 				continue
 			}
 
-			a := Nod(OINDEX, var_, index)
+			a = Nod(OINDEX, var_, index)
 			arraylit(ctxt, pass, value, a, init)
 			continue
 
 		case OSTRUCTLIT:
-			a := Nod(OINDEX, var_, index)
+			a = Nod(OINDEX, var_, index)
 			structlit(ctxt, pass, value, a, init)
 			continue
 		}
@@ -695,28 +681,33 @@ func arraylit(ctxt int, pass int, n *Node, var_ *Node, init *Nodes) {
 
 		// build list of var[index] = value
 		setlineno(value)
-		a := Nod(OINDEX, var_, index)
+		a = Nod(OINDEX, var_, index)
 
 		a = Nod(OAS, a, value)
-		a = typecheck(a, Etop)
+		typecheck(&a, Etop)
 		if pass == 1 {
-			a = walkexpr(a, init)
+			walkexpr(&a, init)
 			if a.Op != OAS {
 				Fatalf("arraylit: not as")
 			}
 			a.Dodata = 2
 		} else {
-			a = orderstmtinplace(a)
-			a = walkstmt(a)
+			orderstmtinplace(&a)
+			walkstmt(&a)
 		}
 
-		init.Append(a)
+		*init = list(*init, a)
 	}
 }
 
-func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
-	// make an array type corresponding the number of elements we have
-	t := typArray(n.Type.Elem(), n.Right.Int64())
+func slicelit(ctxt int, n *Node, var_ *Node, init **NodeList) {
+	// make an array type
+	t := shallow(n.Type)
+
+	t.Bound = Mpgetfix(n.Right.Val().U.(*Mpint))
+	t.Width = 0
+	t.Sym = nil
+	t.Haspointers = 0
 	dowidth(t)
 
 	if ctxt != 0 {
@@ -727,12 +718,12 @@ func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 		arraylit(ctxt, 2, n, vstat, init)
 
 		// copy static to slice
-		a := Nod(OSLICE, vstat, nil)
+		a := Nod(OSLICE, vstat, Nod(OKEY, nil, nil))
 
 		a = Nod(OAS, var_, a)
-		a = typecheck(a, Etop)
+		typecheck(&a, Etop)
 		a.Dodata = 2
-		init.Append(a)
+		*init = list(*init, a)
 		return
 	}
 
@@ -745,22 +736,22 @@ func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 	//	var vauto *[...]t = new([...]t)
 	// 4. copy the static array to the auto array
 	//	*vauto = vstat
-	// 5. for each dynamic part assign to the array
-	//	vauto[i] = dynamic part
-	// 6. assign slice of allocated heap to var
-	//	var = vauto[:]
+	// 5. assign slice of allocated heap to var
+	//	var = [0:]*auto
+	// 6. for each dynamic part assign to the slice
+	//	var[i] = dynamic part
 	//
 	// an optimization is done if there is no constant part
 	//	3. var vauto *[...]t = new([...]t)
-	//	5. vauto[i] = dynamic part
-	//	6. var = vauto[:]
+	//	5. var = [0:]*auto
+	//	6. var[i] = dynamic part
 
 	// if the literal contains constants,
 	// make static initialized array (1),(2)
 	var vstat *Node
 
 	mode := getdyn(n, 1)
-	if mode&initConst != 0 {
+	if mode&MODECONST != 0 {
 		vstat = staticname(t, ctxt)
 		arraylit(ctxt, 1, n, vstat, init)
 	}
@@ -776,8 +767,8 @@ func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 
 		if vstat == nil {
 			a = Nod(OAS, x, nil)
-			a = typecheck(a, Etop)
-			init.Append(a) // zero new temp
+			typecheck(&a, Etop)
+			*init = list(*init, a) // zero new temp
 		}
 
 		a = Nod(OADDR, x, nil)
@@ -785,47 +776,56 @@ func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 		a = temp(t)
 		if vstat == nil {
 			a = Nod(OAS, temp(t), nil)
-			a = typecheck(a, Etop)
-			init.Append(a) // zero new temp
+			typecheck(&a, Etop)
+			*init = list(*init, a) // zero new temp
 			a = a.Left
 		}
 
 		a = Nod(OADDR, a, nil)
 	} else {
 		a = Nod(ONEW, nil, nil)
-		a.List.Set1(typenod(t))
+		a.List = list1(typenod(t))
 	}
 
 	a = Nod(OAS, vauto, a)
-	a = typecheck(a, Etop)
-	a = walkexpr(a, init)
-	init.Append(a)
+	typecheck(&a, Etop)
+	walkexpr(&a, init)
+	*init = list(*init, a)
 
 	if vstat != nil {
 		// copy static to heap (4)
 		a = Nod(OIND, vauto, nil)
 
 		a = Nod(OAS, a, vstat)
-		a = typecheck(a, Etop)
-		a = walkexpr(a, init)
-		init.Append(a)
+		typecheck(&a, Etop)
+		walkexpr(&a, init)
+		*init = list(*init, a)
 	}
 
-	// put dynamics into array (5)
-	for _, r := range n.List.Slice() {
+	// make slice out of heap (5)
+	a = Nod(OAS, var_, Nod(OSLICE, vauto, Nod(OKEY, nil, nil)))
+
+	typecheck(&a, Etop)
+	orderstmtinplace(&a)
+	walkstmt(&a)
+	*init = list(*init, a)
+
+	// put dynamics into slice (6)
+	for l := n.List; l != nil; l = l.Next {
+		r := l.N
 		if r.Op != OKEY {
 			Fatalf("slicelit: rhs not OKEY: %v", r)
 		}
 		index := r.Left
 		value := r.Right
-		a := Nod(OINDEX, vauto, index)
+		a := Nod(OINDEX, var_, index)
 		a.Bounded = true
 
 		// TODO need to check bounds?
 
 		switch value.Op {
 		case OARRAYLIT:
-			if value.Type.IsSlice() {
+			if value.Type.Bound < 0 {
 				break
 			}
 			arraylit(ctxt, 2, value, a, init)
@@ -840,38 +840,32 @@ func slicelit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 			continue
 		}
 
-		// build list of vauto[c] = expr
+		// build list of var[c] = expr
 		setlineno(value)
 		a = Nod(OAS, a, value)
 
-		a = typecheck(a, Etop)
-		a = orderstmtinplace(a)
-		a = walkstmt(a)
-		init.Append(a)
+		typecheck(&a, Etop)
+		orderstmtinplace(&a)
+		walkstmt(&a)
+		*init = list(*init, a)
 	}
-
-	// make slice out of heap (6)
-	a = Nod(OAS, var_, Nod(OSLICE, vauto, nil))
-
-	a = typecheck(a, Etop)
-	a = orderstmtinplace(a)
-	a = walkstmt(a)
-	init.Append(a)
 }
 
-func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
+func maplit(ctxt int, n *Node, var_ *Node, init **NodeList) {
 	ctxt = 0
 
 	// make the map var
 	nerr := nerrors
 
 	a := Nod(OMAKE, nil, nil)
-	a.List.Set1(typenod(n.Type))
+	a.List = list1(typenod(n.Type))
 	litas(var_, a, init)
 
 	// count the initializers
-	b := 0
-	for _, r := range n.List.Slice() {
+	b := int64(0)
+
+	for l := n.List; l != nil; l = l.Next {
+		r := l.N
 		if r.Op != OKEY {
 			Fatalf("maplit: rhs not OKEY: %v", r)
 		}
@@ -886,33 +880,40 @@ func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 	if b != 0 {
 		// build type [count]struct { a Tindex, b Tvalue }
 		t := n.Type
-		tk := t.Key()
-		tv := t.Val()
+
+		tk := t.Down
+		tv := t.Type
+
+		symb := Lookup("b")
+		t = typ(TFIELD)
+		t.Type = tv
+		t.Sym = symb
 
 		syma := Lookup("a")
-		symb := Lookup("b")
+		t1 := t
+		t = typ(TFIELD)
+		t.Type = tk
+		t.Sym = syma
+		t.Down = t1
 
-		var fields [2]*Field
-		fields[0] = newField()
-		fields[0].Type = tk
-		fields[0].Sym = syma
-		fields[1] = newField()
-		fields[1].Type = tv
-		fields[1].Sym = symb
+		t1 = t
+		t = typ(TSTRUCT)
+		t.Type = t1
 
-		tstruct := typ(TSTRUCT)
-		tstruct.SetFields(fields[:])
+		t1 = t
+		t = typ(TARRAY)
+		t.Bound = b
+		t.Type = t1
 
-		tarr := typArray(tstruct, int64(b))
-
-		// TODO(josharian): suppress alg generation for these types?
-		dowidth(tarr)
+		dowidth(t)
 
 		// make and initialize static array
-		vstat := staticname(tarr, ctxt)
+		vstat := staticname(t, ctxt)
 
 		b := int64(0)
-		for _, r := range n.List.Slice() {
+		for l := n.List; l != nil; l = l.Next {
+			r := l.N
+
 			if r.Op != OKEY {
 				Fatalf("maplit: rhs not OKEY: %v", r)
 			}
@@ -925,24 +926,24 @@ func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 				a = Nodintconst(b)
 
 				a = Nod(OINDEX, vstat, a)
-				a = NodSym(ODOT, a, syma)
+				a = Nod(ODOT, a, newname(syma))
 				a = Nod(OAS, a, index)
-				a = typecheck(a, Etop)
-				a = walkexpr(a, init)
+				typecheck(&a, Etop)
+				walkexpr(&a, init)
 				a.Dodata = 2
-				init.Append(a)
+				*init = list(*init, a)
 
 				// build vstat[b].b = value;
 				setlineno(value)
 				a = Nodintconst(b)
 
 				a = Nod(OINDEX, vstat, a)
-				a = NodSym(ODOT, a, symb)
+				a = Nod(ODOT, a, newname(symb))
 				a = Nod(OAS, a, value)
-				a = typecheck(a, Etop)
-				a = walkexpr(a, init)
+				typecheck(&a, Etop)
+				walkexpr(&a, init)
 				a.Dodata = 2
-				init.Append(a)
+				*init = list(*init, a)
 
 				b++
 			}
@@ -956,30 +957,34 @@ func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 
 		a = Nod(OINDEX, vstat, index)
 		a.Bounded = true
-		a = NodSym(ODOT, a, symb)
+		a = Nod(ODOT, a, newname(symb))
 
 		r := Nod(OINDEX, vstat, index)
 		r.Bounded = true
-		r = NodSym(ODOT, r, syma)
+		r = Nod(ODOT, r, newname(syma))
 		r = Nod(OINDEX, var_, r)
 
 		r = Nod(OAS, r, a)
 
 		a = Nod(OFOR, nil, nil)
-		a.Nbody.Set1(r)
+		a.Nbody = list1(r)
 
-		a.Ninit.Set1(Nod(OAS, index, Nodintconst(0)))
-		a.Left = Nod(OLT, index, Nodintconst(tarr.NumElem()))
+		a.Ninit = list1(Nod(OAS, index, Nodintconst(0)))
+		a.Left = Nod(OLT, index, Nodintconst(t.Bound))
 		a.Right = Nod(OAS, index, Nod(OADD, index, Nodintconst(1)))
 
-		a = typecheck(a, Etop)
-		a = walkstmt(a)
-		init.Append(a)
+		typecheck(&a, Etop)
+		walkstmt(&a)
+		*init = list(*init, a)
 	}
 
 	// put in dynamic entries one-at-a-time
-	var key, val *Node
-	for _, r := range n.List.Slice() {
+	var key *Node
+
+	var val *Node
+	for l := n.List; l != nil; l = l.Next {
+		r := l.N
+
 		if r.Op != OKEY {
 			Fatalf("maplit: rhs not OKEY: %v", r)
 		}
@@ -993,26 +998,26 @@ func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 		// build list of var[c] = expr.
 		// use temporary so that mapassign1 can have addressable key, val.
 		if key == nil {
-			key = temp(var_.Type.Key())
-			val = temp(var_.Type.Val())
+			key = temp(var_.Type.Down)
+			val = temp(var_.Type.Type)
 		}
 
 		setlineno(r.Left)
 		a = Nod(OAS, key, r.Left)
-		a = typecheck(a, Etop)
-		a = walkstmt(a)
-		init.Append(a)
+		typecheck(&a, Etop)
+		walkstmt(&a)
+		*init = list(*init, a)
 		setlineno(r.Right)
 		a = Nod(OAS, val, r.Right)
-		a = typecheck(a, Etop)
-		a = walkstmt(a)
-		init.Append(a)
+		typecheck(&a, Etop)
+		walkstmt(&a)
+		*init = list(*init, a)
 
 		setlineno(val)
 		a = Nod(OAS, Nod(OINDEX, var_, key), val)
-		a = typecheck(a, Etop)
-		a = walkstmt(a)
-		init.Append(a)
+		typecheck(&a, Etop)
+		walkstmt(&a)
+		*init = list(*init, a)
 
 		if nerr != nerrors {
 			break
@@ -1021,29 +1026,29 @@ func maplit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 
 	if key != nil {
 		a = Nod(OVARKILL, key, nil)
-		a = typecheck(a, Etop)
-		init.Append(a)
+		typecheck(&a, Etop)
+		*init = list(*init, a)
 		a = Nod(OVARKILL, val, nil)
-		a = typecheck(a, Etop)
-		init.Append(a)
+		typecheck(&a, Etop)
+		*init = list(*init, a)
 	}
 }
 
-func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
+func anylit(ctxt int, n *Node, var_ *Node, init **NodeList) {
 	t := n.Type
 	switch n.Op {
 	default:
-		Fatalf("anylit: not lit, op=%v node=%v", n.Op, n)
+		Fatalf("anylit: not lit")
 
 	case OPTRLIT:
-		if !t.IsPtr() {
+		if !Isptr[t.Etype] {
 			Fatalf("anylit: not ptr")
 		}
 
 		var r *Node
 		if n.Right != nil {
 			r = Nod(OADDR, n.Right, nil)
-			r = typecheck(r, Erv)
+			typecheck(&r, Erv)
 		} else {
 			r = Nod(ONEW, nil, nil)
 			r.Typecheck = 1
@@ -1051,22 +1056,22 @@ func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 			r.Esc = n.Esc
 		}
 
-		r = walkexpr(r, init)
+		walkexpr(&r, init)
 		a := Nod(OAS, var_, r)
 
-		a = typecheck(a, Etop)
-		init.Append(a)
+		typecheck(&a, Etop)
+		*init = list(*init, a)
 
 		var_ = Nod(OIND, var_, nil)
-		var_ = typecheck(var_, Erv|Easgn)
+		typecheck(&var_, Erv|Easgn)
 		anylit(ctxt, n.Left, var_, init)
 
 	case OSTRUCTLIT:
-		if !t.IsStruct() {
+		if t.Etype != TSTRUCT {
 			Fatalf("anylit: not struct")
 		}
 
-		if var_.isSimpleName() && n.List.Len() > 4 {
+		if simplename(var_) && count(n.List) > 4 {
 			if ctxt == 0 {
 				// lay out static data
 				vstat := staticname(t, ctxt)
@@ -1076,9 +1081,9 @@ func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 				// copy static to var
 				a := Nod(OAS, var_, vstat)
 
-				a = typecheck(a, Etop)
-				a = walkexpr(a, init)
-				init.Append(a)
+				typecheck(&a, Etop)
+				walkexpr(&a, init)
+				*init = list(*init, a)
 
 				// add expressions to automatic
 				structlit(ctxt, 2, n, var_, init)
@@ -1092,25 +1097,25 @@ func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 		}
 
 		// initialize of not completely specified
-		if var_.isSimpleName() || n.List.Len() < t.NumFields() {
+		if simplename(var_) || count(n.List) < structcount(t) {
 			a := Nod(OAS, var_, nil)
-			a = typecheck(a, Etop)
-			a = walkexpr(a, init)
-			init.Append(a)
+			typecheck(&a, Etop)
+			walkexpr(&a, init)
+			*init = list(*init, a)
 		}
 
 		structlit(ctxt, 3, n, var_, init)
 
 	case OARRAYLIT:
-		if t.IsSlice() {
+		if t.Etype != TARRAY {
+			Fatalf("anylit: not array")
+		}
+		if t.Bound < 0 {
 			slicelit(ctxt, n, var_, init)
 			break
 		}
-		if !t.IsArray() {
-			Fatalf("anylit: not array")
-		}
 
-		if var_.isSimpleName() && n.List.Len() > 4 {
+		if simplename(var_) && count(n.List) > 4 {
 			if ctxt == 0 {
 				// lay out static data
 				vstat := staticname(t, ctxt)
@@ -1120,9 +1125,9 @@ func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 				// copy static to automatic
 				a := Nod(OAS, var_, vstat)
 
-				a = typecheck(a, Etop)
-				a = walkexpr(a, init)
-				init.Append(a)
+				typecheck(&a, Etop)
+				walkexpr(&a, init)
+				*init = list(*init, a)
 
 				// add expressions to automatic
 				arraylit(ctxt, 2, n, var_, init)
@@ -1136,24 +1141,24 @@ func anylit(ctxt int, n *Node, var_ *Node, init *Nodes) {
 		}
 
 		// initialize of not completely specified
-		if var_.isSimpleName() || int64(n.List.Len()) < t.NumElem() {
+		if simplename(var_) || int64(count(n.List)) < t.Bound {
 			a := Nod(OAS, var_, nil)
-			a = typecheck(a, Etop)
-			a = walkexpr(a, init)
-			init.Append(a)
+			typecheck(&a, Etop)
+			walkexpr(&a, init)
+			*init = list(*init, a)
 		}
 
 		arraylit(ctxt, 3, n, var_, init)
 
 	case OMAPLIT:
-		if !t.IsMap() {
+		if t.Etype != TMAP {
 			Fatalf("anylit: not map")
 		}
 		maplit(ctxt, n, var_, init)
 	}
 }
 
-func oaslit(n *Node, init *Nodes) bool {
+func oaslit(n *Node, init **NodeList) bool {
 	if n.Left == nil || n.Right == nil {
 		// not a special composit literal assignment
 		return false
@@ -1162,7 +1167,7 @@ func oaslit(n *Node, init *Nodes) bool {
 		// not a special composit literal assignment
 		return false
 	}
-	if !n.Left.isSimpleName() {
+	if !simplename(n.Left) {
 		// not a special composit literal assignment
 		return false
 	}
@@ -1199,12 +1204,11 @@ func oaslit(n *Node, init *Nodes) bool {
 
 func getlit(lit *Node) int {
 	if Smallintconst(lit) {
-		return int(lit.Int64())
+		return int(Mpgetfix(lit.Val().U.(*Mpint)))
 	}
 	return -1
 }
 
-// stataddr sets nam to the static address of n and reports whether it succeeeded.
 func stataddr(nam *Node, n *Node) bool {
 	if n == nil {
 		return false
@@ -1224,7 +1228,7 @@ func stataddr(nam *Node, n *Node) bool {
 		return true
 
 	case OINDEX:
-		if n.Left.Type.IsSlice() {
+		if n.Left.Type.Bound < 0 {
 			break
 		}
 		if !stataddr(nam, n.Left) {
@@ -1258,34 +1262,38 @@ func initplan(n *Node) {
 		Fatalf("initplan")
 
 	case OARRAYLIT:
-		for _, a := range n.List.Slice() {
+		for l := n.List; l != nil; l = l.Next {
+			a := l.N
 			if a.Op != OKEY || !Smallintconst(a.Left) {
 				Fatalf("initplan arraylit")
 			}
-			addvalue(p, n.Type.Elem().Width*a.Left.Int64(), a.Right)
+			addvalue(p, n.Type.Type.Width*Mpgetfix(a.Left.Val().U.(*Mpint)), nil, a.Right)
 		}
 
 	case OSTRUCTLIT:
-		for _, a := range n.List.Slice() {
-			if a.Op != OKEY || a.Left.Type != structkey {
+		for l := n.List; l != nil; l = l.Next {
+			a := l.N
+			if a.Op != OKEY || a.Left.Type == nil {
 				Fatalf("initplan structlit")
 			}
-			addvalue(p, a.Left.Xoffset, a.Right)
+			addvalue(p, a.Left.Type.Width, nil, a.Right)
 		}
 
 	case OMAPLIT:
-		for _, a := range n.List.Slice() {
+		for l := n.List; l != nil; l = l.Next {
+			a := l.N
 			if a.Op != OKEY {
 				Fatalf("initplan maplit")
 			}
-			addvalue(p, -1, a.Right)
+			addvalue(p, -1, a.Left, a.Right)
 		}
 	}
 }
 
-func addvalue(p *InitPlan, xoffset int64, n *Node) {
+func addvalue(p *InitPlan, xoffset int64, key *Node, n *Node) {
 	// special case: zero can be dropped entirely
 	if iszero(n) {
+		p.Zero += n.Type.Width
 		return
 	}
 
@@ -1294,46 +1302,62 @@ func addvalue(p *InitPlan, xoffset int64, n *Node) {
 		initplan(n)
 		q := initplans[n]
 		for _, qe := range q.E {
-			// qe is a copy; we are not modifying entries in q.E
-			qe.Xoffset += xoffset
-			p.E = append(p.E, qe)
+			e := entry(p)
+			*e = qe
+			e.Xoffset += xoffset
 		}
 		return
 	}
 
 	// add to plan
-	p.E = append(p.E, InitEntry{Xoffset: xoffset, Expr: n})
+	if n.Op == OLITERAL {
+		p.Lit += n.Type.Width
+	} else {
+		p.Expr += n.Type.Width
+	}
+
+	e := entry(p)
+	e.Xoffset = xoffset
+	e.Expr = n
 }
 
 func iszero(n *Node) bool {
 	switch n.Op {
 	case OLITERAL:
-		switch u := n.Val().U.(type) {
+		switch n.Val().Ctype() {
 		default:
 			Dump("unexpected literal", n)
 			Fatalf("iszero")
-		case *NilVal:
+
+		case CTNIL:
 			return true
-		case string:
-			return u == ""
-		case bool:
-			return !u
-		case *Mpint:
-			return u.CmpInt64(0) == 0
-		case *Mpflt:
-			return u.CmpFloat64(0) == 0
-		case *Mpcplx:
-			return u.Real.CmpFloat64(0) == 0 && u.Imag.CmpFloat64(0) == 0
+
+		case CTSTR:
+			return n.Val().U.(string) == ""
+
+		case CTBOOL:
+			return !n.Val().U.(bool)
+
+		case CTINT, CTRUNE:
+			return mpcmpfixc(n.Val().U.(*Mpint), 0) == 0
+
+		case CTFLT:
+			return mpcmpfltc(n.Val().U.(*Mpflt), 0) == 0
+
+		case CTCPLX:
+			return mpcmpfltc(&n.Val().U.(*Mpcplx).Real, 0) == 0 && mpcmpfltc(&n.Val().U.(*Mpcplx).Imag, 0) == 0
 		}
 
 	case OARRAYLIT:
-		if n.Type.IsSlice() {
+		if Isslice(n.Type) {
 			break
 		}
 		fallthrough
+
+		// fall through
 	case OSTRUCTLIT:
-		for _, n1 := range n.List.Slice() {
-			if !iszero(n1.Right) {
+		for l := n.List; l != nil; l = l.Next {
+			if !iszero(l.N.Right) {
 				return false
 			}
 		}
@@ -1344,86 +1368,93 @@ func iszero(n *Node) bool {
 }
 
 func isvaluelit(n *Node) bool {
-	return (n.Op == OARRAYLIT && n.Type.IsArray()) || n.Op == OSTRUCTLIT
+	return (n.Op == OARRAYLIT && Isfixedarray(n.Type)) || n.Op == OSTRUCTLIT
 }
 
-// gen_as_init attempts to emit static data for n and reports whether it succeeded.
-// If reportOnly is true, it does not emit static data and does not modify the AST.
-func gen_as_init(n *Node, reportOnly bool) bool {
-	success := genAsInitNoCheck(n, reportOnly)
-	if !success && n.Dodata == 2 {
-		Dump("\ngen_as_init", n)
-		Fatalf("gen_as_init couldn't make data statement")
-	}
-	return success
+func entry(p *InitPlan) *InitEntry {
+	p.E = append(p.E, InitEntry{})
+	return &p.E[len(p.E)-1]
 }
 
-func genAsInitNoCheck(n *Node, reportOnly bool) bool {
+func gen_as_init(n *Node) bool {
+	var nr *Node
+	var nl *Node
+	var nam Node
+
 	if n.Dodata == 0 {
-		return false
+		goto no
 	}
 
-	nr := n.Right
-	nl := n.Left
+	nr = n.Right
+	nl = n.Left
 	if nr == nil {
 		var nam Node
-		return stataddr(&nam, nl) && nam.Class == PEXTERN
+		if !stataddr(&nam, nl) {
+			goto no
+		}
+		if nam.Class != PEXTERN {
+			goto no
+		}
+		return true
 	}
 
 	if nr.Type == nil || !Eqtype(nl.Type, nr.Type) {
-		return false
+		goto no
 	}
 
-	var nam Node
-	if !stataddr(&nam, nl) || nam.Class != PEXTERN {
-		return false
+	if !stataddr(&nam, nl) {
+		goto no
+	}
+
+	if nam.Class != PEXTERN {
+		goto no
 	}
 
 	switch nr.Op {
 	default:
-		return false
+		goto no
 
 	case OCONVNOP:
 		nr = nr.Left
 		if nr == nil || nr.Op != OSLICEARR {
-			return false
+			goto no
 		}
 		fallthrough
 
+		// fall through
 	case OSLICEARR:
-		low, high, _ := nr.SliceBounds()
-		if low != nil || high != nil {
-			return false
-		}
-		nr = nr.Left
-		if nr == nil || nr.Op != OADDR {
-			return false
-		}
-		ptr := nr
-		nr = nr.Left
-		if nr == nil || nr.Op != ONAME {
-			return false
-		}
+		if nr.Right.Op == OKEY && nr.Right.Left == nil && nr.Right.Right == nil {
+			nr = nr.Left
+			gused(nil) // in case the data is the dest of a goto
+			nl := nr
+			if nr == nil || nr.Op != OADDR {
+				goto no
+			}
+			nr = nr.Left
+			if nr == nil || nr.Op != ONAME {
+				goto no
+			}
 
-		// nr is the array being converted to a slice
-		if nr.Type == nil || !nr.Type.IsArray() {
-			return false
-		}
+			// nr is the array being converted to a slice
+			if nr.Type == nil || nr.Type.Etype != TARRAY || nr.Type.Bound < 0 {
+				goto no
+			}
 
-		if !reportOnly {
 			nam.Xoffset += int64(Array_array)
-			gdata(&nam, ptr, Widthptr)
+			gdata(&nam, nl, int(Types[Tptr].Width))
 
 			nam.Xoffset += int64(Array_nel) - int64(Array_array)
 			var nod1 Node
-			Nodconst(&nod1, Types[TINT], nr.Type.NumElem())
+			Nodconst(&nod1, Types[TINT], nr.Type.Bound)
 			gdata(&nam, &nod1, Widthint)
 
 			nam.Xoffset += int64(Array_cap) - int64(Array_nel)
 			gdata(&nam, &nod1, Widthint)
+
+			return true
 		}
 
-		return true
+		goto no
 
 	case OLITERAL:
 		break
@@ -1431,27 +1462,40 @@ func genAsInitNoCheck(n *Node, reportOnly bool) bool {
 
 	switch nr.Type.Etype {
 	default:
-		return false
+		goto no
 
-	case TBOOL, TINT8, TUINT8, TINT16, TUINT16,
-		TINT32, TUINT32, TINT64, TUINT64,
-		TINT, TUINT, TUINTPTR,
-		TPTR32, TPTR64,
-		TFLOAT32, TFLOAT64:
-		if !reportOnly {
-			gdata(&nam, nr, int(nr.Type.Width))
-		}
+	case TBOOL,
+		TINT8,
+		TUINT8,
+		TINT16,
+		TUINT16,
+		TINT32,
+		TUINT32,
+		TINT64,
+		TUINT64,
+		TINT,
+		TUINT,
+		TUINTPTR,
+		TPTR32,
+		TPTR64,
+		TFLOAT32,
+		TFLOAT64:
+		gdata(&nam, nr, int(nr.Type.Width))
 
 	case TCOMPLEX64, TCOMPLEX128:
-		if !reportOnly {
-			gdatacomplex(&nam, nr.Val().U.(*Mpcplx))
-		}
+		gdatacomplex(&nam, nr.Val().U.(*Mpcplx))
 
 	case TSTRING:
-		if !reportOnly {
-			gdatastring(&nam, nr.Val().U.(string))
-		}
+		gdatastring(&nam, nr.Val().U.(string))
 	}
 
 	return true
+
+no:
+	if n.Dodata == 2 {
+		Dump("\ngen_as_init", n)
+		Fatalf("gen_as_init couldnt make data statement")
+	}
+
+	return false
 }

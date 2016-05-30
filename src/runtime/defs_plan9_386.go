@@ -30,13 +30,9 @@ type sigctxt struct {
 
 func (c *sigctxt) pc() uintptr { return uintptr(c.u.pc) }
 func (c *sigctxt) sp() uintptr { return uintptr(c.u.sp) }
-func (c *sigctxt) lr() uintptr { return uintptr(0) }
 
 func (c *sigctxt) setpc(x uintptr) { c.u.pc = uint32(x) }
 func (c *sigctxt) setsp(x uintptr) { c.u.sp = uint32(x) }
-func (c *sigctxt) setlr(x uintptr) {}
-
-func (c *sigctxt) savelr(x uintptr) {}
 
 func dumpregs(u *ureg) {
 	print("ax    ", hex(u.ax), "\n")
@@ -53,5 +49,3 @@ func dumpregs(u *ureg) {
 	print("fs    ", hex(u.fs), "\n")
 	print("gs    ", hex(u.gs), "\n")
 }
-
-func sigpanictramp() {}

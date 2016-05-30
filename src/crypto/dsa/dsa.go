@@ -52,7 +52,7 @@ const numMRTests = 64
 
 // GenerateParameters puts a random, valid set of DSA parameters into params.
 // This function can take many seconds, even on fast machines.
-func GenerateParameters(params *Parameters, rand io.Reader, sizes ParameterSizes) error {
+func GenerateParameters(params *Parameters, rand io.Reader, sizes ParameterSizes) (err error) {
 	// This function doesn't follow FIPS 186-3 exactly in that it doesn't
 	// use a verification seed to generate the primes. The verification
 	// seed doesn't appear to be exported or used by other code and
@@ -87,8 +87,9 @@ func GenerateParameters(params *Parameters, rand io.Reader, sizes ParameterSizes
 
 GeneratePrimes:
 	for {
-		if _, err := io.ReadFull(rand, qBytes); err != nil {
-			return err
+		_, err = io.ReadFull(rand, qBytes)
+		if err != nil {
+			return
 		}
 
 		qBytes[len(qBytes)-1] |= 1
@@ -100,8 +101,9 @@ GeneratePrimes:
 		}
 
 		for i := 0; i < 4*L; i++ {
-			if _, err := io.ReadFull(rand, pBytes); err != nil {
-				return err
+			_, err = io.ReadFull(rand, pBytes)
+			if err != nil {
+				return
 			}
 
 			pBytes[len(pBytes)-1] |= 1
@@ -140,7 +142,7 @@ GeneratePrimes:
 		}
 
 		params.G = g
-		return nil
+		return
 	}
 }
 
@@ -246,10 +248,6 @@ func Sign(rand io.Reader, priv *PrivateKey, hash []byte) (r, s *big.Int, err err
 // truncation itself.
 func Verify(pub *PublicKey, hash []byte, r, s *big.Int) bool {
 	// FIPS 186-3, section 4.7
-
-	if pub.P.Sign() == 0 {
-		return false
-	}
 
 	if r.Sign() < 1 || r.Cmp(pub.Q) >= 0 {
 		return false

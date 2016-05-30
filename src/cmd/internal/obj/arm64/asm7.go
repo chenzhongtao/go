@@ -1,14 +1,14 @@
 // cmd/7l/asm.c, cmd/7l/asmout.c, cmd/7l/optab.c, cmd/7l/span.c, cmd/ld/sub.c, cmd/ld/mod.c, from Vita Nuova.
 // https://code.google.com/p/ken-cc/source/browse/
 //
-// 	Copyright © 1994-1999 Lucent Technologies Inc. All rights reserved.
+// 	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 // 	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
 // 	Portions Copyright © 1997-1999 Vita Nuova Limited
 // 	Portions Copyright © 2000-2007 Vita Nuova Holdings Limited (www.vitanuova.com)
 // 	Portions Copyright © 2004,2006 Bruce Ellis
 // 	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 // 	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-// 	Portions Copyright © 2009 The Go Authors. All rights reserved.
+// 	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -47,7 +47,7 @@ const (
 )
 
 type Optab struct {
-	as    obj.As
+	as    uint16
 	a1    uint8
 	a2    uint8
 	a3    uint8
@@ -58,9 +58,14 @@ type Optab struct {
 	scond uint16
 }
 
-var oprange [ALAST & obj.AMask][]Optab
+type Oprange struct {
+	start []Optab
+	stop  []Optab
+}
 
-var xcmp [C_NCLASS][C_NCLASS]bool
+var oprange [ALAST]Oprange
+
+var xcmp [C_NCLASS][C_NCLASS]uint8
 
 const (
 	S32     = 0 << 31
@@ -155,7 +160,6 @@ var optab = []Optab{
 	{AADC, C_REG, C_REG, C_REG, 1, 4, 0, 0, 0},
 	{AADC, C_REG, C_NONE, C_REG, 1, 4, 0, 0, 0},
 	{ANEG, C_REG, C_NONE, C_REG, 25, 4, 0, 0, 0},
-	{ANEG, C_NONE, C_NONE, C_REG, 25, 4, 0, 0, 0},
 	{ANGC, C_REG, C_NONE, C_REG, 17, 4, 0, 0, 0},
 	{ACMP, C_REG, C_REG, C_NONE, 1, 4, 0, 0, 0},
 	{AADD, C_ADDCON, C_RSP, C_RSP, 2, 4, 0, 0, 0},
@@ -528,7 +532,7 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 	ctxt.Cursym = cursym
 	ctxt.Autosize = int32(p.To.Offset&0xffffffff) + 8
 
-	if oprange[AAND&obj.AMask] == nil {
+	if oprange[AAND].start == nil {
 		buildop(ctxt)
 	}
 
@@ -630,7 +634,7 @@ func span7(ctxt *obj.Link, cursym *obj.LSym) {
 	/*
 	 * lay out the code, emitting code and data relocations.
 	 */
-	cursym.Grow(cursym.Size)
+	obj.Symgrow(ctxt, cursym, cursym.Size)
 	bp := cursym.P
 	psz := int32(0)
 	var i int
@@ -966,14 +970,15 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 
 	case obj.TYPE_MEM:
 		switch a.Name {
-		case obj.NAME_EXTERN, obj.NAME_STATIC:
+		case obj.NAME_EXTERN,
+			obj.NAME_STATIC:
 			if a.Sym == nil {
 				break
 			}
 			ctxt.Instoffset = a.Offset
 			if a.Sym != nil { // use relocation
 				if a.Sym.Type == obj.STLSBSS {
-					if ctxt.Flag_shared {
+					if ctxt.Flag_shared != 0 {
 						return C_TLS_IE
 					} else {
 						return C_TLS_LE
@@ -994,7 +999,7 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 			ctxt.Instoffset = int64(ctxt.Autosize) + a.Offset + 8
 			return autoclass(ctxt.Instoffset)
 
-		case obj.NAME_NONE:
+		case obj.TYPE_NONE:
 			ctxt.Instoffset = a.Offset
 			return oregclass(ctxt.Instoffset)
 		}
@@ -1006,9 +1011,10 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 	case obj.TYPE_TEXTSIZE:
 		return C_TEXTSIZE
 
-	case obj.TYPE_CONST, obj.TYPE_ADDR:
+	case obj.TYPE_CONST,
+		obj.TYPE_ADDR:
 		switch a.Name {
-		case obj.NAME_NONE:
+		case obj.TYPE_NONE:
 			ctxt.Instoffset = a.Offset
 			if a.Reg != 0 && a.Reg != REGZERO {
 				goto aconsize
@@ -1052,7 +1058,8 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 			}
 			return C_VCON
 
-		case obj.NAME_EXTERN, obj.NAME_STATIC:
+		case obj.NAME_EXTERN,
+			obj.NAME_STATIC:
 			if a.Sym == nil {
 				break
 			}
@@ -1088,7 +1095,7 @@ func aclass(ctxt *obj.Link, a *obj.Addr) int {
 func oplook(ctxt *obj.Link, p *obj.Prog) *Optab {
 	a1 := int(p.Optab)
 	if a1 != 0 {
-		return &optab[a1-1]
+		return &optab[a1-1:][0]
 	}
 	a1 = int(p.From.Class)
 	if a1 == 0 {
@@ -1108,31 +1115,41 @@ func oplook(ctxt *obj.Link, p *obj.Prog) *Optab {
 	if p.Reg != 0 {
 		a2 = rclass(p.Reg)
 	}
+	r := int(p.As)
+	o := oprange[r].start
+	if o == nil {
+		o = oprange[r].stop /* just generate an error */
+	}
 
 	if false {
-		fmt.Printf("oplook %v %d %d %d\n", obj.Aconv(p.As), a1, a2, a3)
+		fmt.Printf("oplook %v %d %d %d\n", obj.Aconv(int(p.As)), a1, a2, a3)
 		fmt.Printf("\t\t%d %d\n", p.From.Type, p.To.Type)
 	}
 
-	ops := oprange[p.As&obj.AMask]
-	c1 := &xcmp[a1]
-	c2 := &xcmp[a2]
-	c3 := &xcmp[a3]
-	c4 := &xcmp[p.Scond>>5]
-	for i := range ops {
-		op := &ops[i]
-		if (int(op.a2) == a2 || c2[op.a2]) && c4[op.scond>>5] && c1[op.a1] && c3[op.a3] {
-			p.Optab = uint16(cap(optab) - cap(ops) + i + 1)
-			return op
+	e := oprange[r].stop
+	c1 := xcmp[a1][:]
+	c2 := xcmp[a2][:]
+	c3 := xcmp[a3][:]
+	c4 := xcmp[p.Scond>>5][:]
+	for ; -cap(o) < -cap(e); o = o[1:] {
+		if int(o[0].a2) == a2 || c2[o[0].a2] != 0 {
+			if c4[o[0].scond>>5] != 0 {
+				if c1[o[0].a1] != 0 {
+					if c3[o[0].a3] != 0 {
+						p.Optab = uint16((-cap(o) + cap(optab)) + 1)
+						return &o[0]
+					}
+				}
+			}
 		}
 	}
 
 	ctxt.Diag("illegal combination %v %v %v %v, %d %d", p, DRconv(a1), DRconv(a2), DRconv(a3), p.From.Type, p.To.Type)
 	prasm(p)
-	if ops == nil {
-		ops = optab
+	if o == nil {
+		o = optab
 	}
-	return &ops[0]
+	return &o[0]
 }
 
 func cmp(a int, b int) bool {
@@ -1291,26 +1308,27 @@ func (x ocmp) Swap(i, j int) {
 func (x ocmp) Less(i, j int) bool {
 	p1 := &x[i]
 	p2 := &x[j]
-	if p1.as != p2.as {
-		return p1.as < p2.as
+	n := int(p1.as) - int(p2.as)
+	if n != 0 {
+		return n < 0
 	}
-	if p1.a1 != p2.a1 {
-		return p1.a1 < p2.a1
+	n = int(p1.a1) - int(p2.a1)
+	if n != 0 {
+		return n < 0
 	}
-	if p1.a2 != p2.a2 {
-		return p1.a2 < p2.a2
+	n = int(p1.a2) - int(p2.a2)
+	if n != 0 {
+		return n < 0
 	}
-	if p1.a3 != p2.a3 {
-		return p1.a3 < p2.a3
+	n = int(p1.a3) - int(p2.a3)
+	if n != 0 {
+		return n < 0
 	}
-	if p1.scond != p2.scond {
-		return p1.scond < p2.scond
+	n = int(p1.scond) - int(p2.scond)
+	if n != 0 {
+		return n < 0
 	}
 	return false
-}
-
-func oprangeset(a obj.As, t []Optab) {
-	oprange[a&obj.AMask] = t
 }
 
 func buildop(ctxt *obj.Link) {
@@ -1318,244 +1336,246 @@ func buildop(ctxt *obj.Link) {
 	for i := 0; i < C_GOK; i++ {
 		for n = 0; n < C_GOK; n++ {
 			if cmp(n, i) {
-				xcmp[i][n] = true
+				xcmp[i][n] = 1
 			}
 		}
 	}
 	for n = 0; optab[n].as != obj.AXXX; n++ {
 	}
 	sort.Sort(ocmp(optab[:n]))
+	var r int
+	var t Oprange
 	for i := 0; i < n; i++ {
-		r := optab[i].as
-		start := i
-		for optab[i].as == r {
+		r = int(optab[i].as)
+		oprange[r].start = optab[i:]
+		for int(optab[i].as) == r {
 			i++
 		}
-		t := optab[start:i]
+		oprange[r].stop = optab[i:]
 		i--
-		oprangeset(r, t)
+		t = oprange[r]
 		switch r {
 		default:
 			ctxt.Diag("unknown op in build: %v", obj.Aconv(r))
 			log.Fatalf("bad code")
 
 		case AADD:
-			oprangeset(AADDS, t)
-			oprangeset(ASUB, t)
-			oprangeset(ASUBS, t)
-			oprangeset(AADDW, t)
-			oprangeset(AADDSW, t)
-			oprangeset(ASUBW, t)
-			oprangeset(ASUBSW, t)
+			oprange[AADDS] = t
+			oprange[ASUB] = t
+			oprange[ASUBS] = t
+			oprange[AADDW] = t
+			oprange[AADDSW] = t
+			oprange[ASUBW] = t
+			oprange[ASUBSW] = t
 
 		case AAND: /* logical immediate, logical shifted register */
-			oprangeset(AANDS, t)
+			oprange[AANDS] = t
 
-			oprangeset(AANDSW, t)
-			oprangeset(AANDW, t)
-			oprangeset(AEOR, t)
-			oprangeset(AEORW, t)
-			oprangeset(AORR, t)
-			oprangeset(AORRW, t)
+			oprange[AANDSW] = t
+			oprange[AANDW] = t
+			oprange[AEOR] = t
+			oprange[AEORW] = t
+			oprange[AORR] = t
+			oprange[AORRW] = t
 
 		case ABIC: /* only logical shifted register */
-			oprangeset(ABICS, t)
+			oprange[ABICS] = t
 
-			oprangeset(ABICSW, t)
-			oprangeset(ABICW, t)
-			oprangeset(AEON, t)
-			oprangeset(AEONW, t)
-			oprangeset(AORN, t)
-			oprangeset(AORNW, t)
+			oprange[ABICSW] = t
+			oprange[ABICW] = t
+			oprange[AEON] = t
+			oprange[AEONW] = t
+			oprange[AORN] = t
+			oprange[AORNW] = t
 
 		case ANEG:
-			oprangeset(ANEGS, t)
-			oprangeset(ANEGSW, t)
-			oprangeset(ANEGW, t)
+			oprange[ANEGS] = t
+			oprange[ANEGSW] = t
+			oprange[ANEGW] = t
 
 		case AADC: /* rn=Rd */
-			oprangeset(AADCW, t)
+			oprange[AADCW] = t
 
-			oprangeset(AADCS, t)
-			oprangeset(AADCSW, t)
-			oprangeset(ASBC, t)
-			oprangeset(ASBCW, t)
-			oprangeset(ASBCS, t)
-			oprangeset(ASBCSW, t)
+			oprange[AADCS] = t
+			oprange[AADCSW] = t
+			oprange[ASBC] = t
+			oprange[ASBCW] = t
+			oprange[ASBCS] = t
+			oprange[ASBCSW] = t
 
 		case ANGC: /* rn=REGZERO */
-			oprangeset(ANGCW, t)
+			oprange[ANGCW] = t
 
-			oprangeset(ANGCS, t)
-			oprangeset(ANGCSW, t)
+			oprange[ANGCS] = t
+			oprange[ANGCSW] = t
 
 		case ACMP:
-			oprangeset(ACMPW, t)
-			oprangeset(ACMN, t)
-			oprangeset(ACMNW, t)
+			oprange[ACMPW] = t
+			oprange[ACMN] = t
+			oprange[ACMNW] = t
 
 		case ATST:
-			oprangeset(ATSTW, t)
+			oprange[ATSTW] = t
 
 			/* register/register, and shifted */
 		case AMVN:
-			oprangeset(AMVNW, t)
+			oprange[AMVNW] = t
 
 		case AMOVK:
-			oprangeset(AMOVKW, t)
-			oprangeset(AMOVN, t)
-			oprangeset(AMOVNW, t)
-			oprangeset(AMOVZ, t)
-			oprangeset(AMOVZW, t)
+			oprange[AMOVKW] = t
+			oprange[AMOVN] = t
+			oprange[AMOVNW] = t
+			oprange[AMOVZ] = t
+			oprange[AMOVZW] = t
 
 		case ABEQ:
-			oprangeset(ABNE, t)
-			oprangeset(ABCS, t)
-			oprangeset(ABHS, t)
-			oprangeset(ABCC, t)
-			oprangeset(ABLO, t)
-			oprangeset(ABMI, t)
-			oprangeset(ABPL, t)
-			oprangeset(ABVS, t)
-			oprangeset(ABVC, t)
-			oprangeset(ABHI, t)
-			oprangeset(ABLS, t)
-			oprangeset(ABGE, t)
-			oprangeset(ABLT, t)
-			oprangeset(ABGT, t)
-			oprangeset(ABLE, t)
+			oprange[ABNE] = t
+			oprange[ABCS] = t
+			oprange[ABHS] = t
+			oprange[ABCC] = t
+			oprange[ABLO] = t
+			oprange[ABMI] = t
+			oprange[ABPL] = t
+			oprange[ABVS] = t
+			oprange[ABVC] = t
+			oprange[ABHI] = t
+			oprange[ABLS] = t
+			oprange[ABGE] = t
+			oprange[ABLT] = t
+			oprange[ABGT] = t
+			oprange[ABLE] = t
 
 		case ALSL:
-			oprangeset(ALSLW, t)
-			oprangeset(ALSR, t)
-			oprangeset(ALSRW, t)
-			oprangeset(AASR, t)
-			oprangeset(AASRW, t)
-			oprangeset(AROR, t)
-			oprangeset(ARORW, t)
+			oprange[ALSLW] = t
+			oprange[ALSR] = t
+			oprange[ALSRW] = t
+			oprange[AASR] = t
+			oprange[AASRW] = t
+			oprange[AROR] = t
+			oprange[ARORW] = t
 
 		case ACLS:
-			oprangeset(ACLSW, t)
-			oprangeset(ACLZ, t)
-			oprangeset(ACLZW, t)
-			oprangeset(ARBIT, t)
-			oprangeset(ARBITW, t)
-			oprangeset(AREV, t)
-			oprangeset(AREVW, t)
-			oprangeset(AREV16, t)
-			oprangeset(AREV16W, t)
-			oprangeset(AREV32, t)
+			oprange[ACLSW] = t
+			oprange[ACLZ] = t
+			oprange[ACLZW] = t
+			oprange[ARBIT] = t
+			oprange[ARBITW] = t
+			oprange[AREV] = t
+			oprange[AREVW] = t
+			oprange[AREV16] = t
+			oprange[AREV16W] = t
+			oprange[AREV32] = t
 
 		case ASDIV:
-			oprangeset(ASDIVW, t)
-			oprangeset(AUDIV, t)
-			oprangeset(AUDIVW, t)
-			oprangeset(ACRC32B, t)
-			oprangeset(ACRC32CB, t)
-			oprangeset(ACRC32CH, t)
-			oprangeset(ACRC32CW, t)
-			oprangeset(ACRC32CX, t)
-			oprangeset(ACRC32H, t)
-			oprangeset(ACRC32W, t)
-			oprangeset(ACRC32X, t)
+			oprange[ASDIVW] = t
+			oprange[AUDIV] = t
+			oprange[AUDIVW] = t
+			oprange[ACRC32B] = t
+			oprange[ACRC32CB] = t
+			oprange[ACRC32CH] = t
+			oprange[ACRC32CW] = t
+			oprange[ACRC32CX] = t
+			oprange[ACRC32H] = t
+			oprange[ACRC32W] = t
+			oprange[ACRC32X] = t
 
 		case AMADD:
-			oprangeset(AMADDW, t)
-			oprangeset(AMSUB, t)
-			oprangeset(AMSUBW, t)
-			oprangeset(ASMADDL, t)
-			oprangeset(ASMSUBL, t)
-			oprangeset(AUMADDL, t)
-			oprangeset(AUMSUBL, t)
+			oprange[AMADDW] = t
+			oprange[AMSUB] = t
+			oprange[AMSUBW] = t
+			oprange[ASMADDL] = t
+			oprange[ASMSUBL] = t
+			oprange[AUMADDL] = t
+			oprange[AUMSUBL] = t
 
 		case AREM:
-			oprangeset(AREMW, t)
-			oprangeset(AUREM, t)
-			oprangeset(AUREMW, t)
+			oprange[AREMW] = t
+			oprange[AUREM] = t
+			oprange[AUREMW] = t
 
 		case AMUL:
-			oprangeset(AMULW, t)
-			oprangeset(AMNEG, t)
-			oprangeset(AMNEGW, t)
-			oprangeset(ASMNEGL, t)
-			oprangeset(ASMULL, t)
-			oprangeset(ASMULH, t)
-			oprangeset(AUMNEGL, t)
-			oprangeset(AUMULH, t)
-			oprangeset(AUMULL, t)
+			oprange[AMULW] = t
+			oprange[AMNEG] = t
+			oprange[AMNEGW] = t
+			oprange[ASMNEGL] = t
+			oprange[ASMULL] = t
+			oprange[ASMULH] = t
+			oprange[AUMNEGL] = t
+			oprange[AUMULH] = t
+			oprange[AUMULL] = t
 
 		case AMOVB:
-			oprangeset(AMOVBU, t)
+			oprange[AMOVBU] = t
 
 		case AMOVH:
-			oprangeset(AMOVHU, t)
+			oprange[AMOVHU] = t
 
 		case AMOVW:
-			oprangeset(AMOVWU, t)
+			oprange[AMOVWU] = t
 
 		case ABFM:
-			oprangeset(ABFMW, t)
-			oprangeset(ASBFM, t)
-			oprangeset(ASBFMW, t)
-			oprangeset(AUBFM, t)
-			oprangeset(AUBFMW, t)
+			oprange[ABFMW] = t
+			oprange[ASBFM] = t
+			oprange[ASBFMW] = t
+			oprange[AUBFM] = t
+			oprange[AUBFMW] = t
 
 		case ABFI:
-			oprangeset(ABFIW, t)
-			oprangeset(ABFXIL, t)
-			oprangeset(ABFXILW, t)
-			oprangeset(ASBFIZ, t)
-			oprangeset(ASBFIZW, t)
-			oprangeset(ASBFX, t)
-			oprangeset(ASBFXW, t)
-			oprangeset(AUBFIZ, t)
-			oprangeset(AUBFIZW, t)
-			oprangeset(AUBFX, t)
-			oprangeset(AUBFXW, t)
+			oprange[ABFIW] = t
+			oprange[ABFXIL] = t
+			oprange[ABFXILW] = t
+			oprange[ASBFIZ] = t
+			oprange[ASBFIZW] = t
+			oprange[ASBFX] = t
+			oprange[ASBFXW] = t
+			oprange[AUBFIZ] = t
+			oprange[AUBFIZW] = t
+			oprange[AUBFX] = t
+			oprange[AUBFXW] = t
 
 		case AEXTR:
-			oprangeset(AEXTRW, t)
+			oprange[AEXTRW] = t
 
 		case ASXTB:
-			oprangeset(ASXTBW, t)
-			oprangeset(ASXTH, t)
-			oprangeset(ASXTHW, t)
-			oprangeset(ASXTW, t)
-			oprangeset(AUXTB, t)
-			oprangeset(AUXTH, t)
-			oprangeset(AUXTW, t)
-			oprangeset(AUXTBW, t)
-			oprangeset(AUXTHW, t)
+			oprange[ASXTBW] = t
+			oprange[ASXTH] = t
+			oprange[ASXTHW] = t
+			oprange[ASXTW] = t
+			oprange[AUXTB] = t
+			oprange[AUXTH] = t
+			oprange[AUXTW] = t
+			oprange[AUXTBW] = t
+			oprange[AUXTHW] = t
 
 		case ACCMN:
-			oprangeset(ACCMNW, t)
-			oprangeset(ACCMP, t)
-			oprangeset(ACCMPW, t)
+			oprange[ACCMNW] = t
+			oprange[ACCMP] = t
+			oprange[ACCMPW] = t
 
 		case ACSEL:
-			oprangeset(ACSELW, t)
-			oprangeset(ACSINC, t)
-			oprangeset(ACSINCW, t)
-			oprangeset(ACSINV, t)
-			oprangeset(ACSINVW, t)
-			oprangeset(ACSNEG, t)
-			oprangeset(ACSNEGW, t)
+			oprange[ACSELW] = t
+			oprange[ACSINC] = t
+			oprange[ACSINCW] = t
+			oprange[ACSINV] = t
+			oprange[ACSINVW] = t
+			oprange[ACSNEG] = t
+			oprange[ACSNEGW] = t
 
 			// aliases Rm=Rn, !cond
-			oprangeset(ACINC, t)
+			oprange[ACINC] = t
 
-			oprangeset(ACINCW, t)
-			oprangeset(ACINV, t)
-			oprangeset(ACINVW, t)
-			oprangeset(ACNEG, t)
-			oprangeset(ACNEGW, t)
+			oprange[ACINCW] = t
+			oprange[ACINV] = t
+			oprange[ACINVW] = t
+			oprange[ACNEG] = t
+			oprange[ACNEGW] = t
 
 			// aliases, Rm=Rn=REGZERO, !cond
 		case ACSET:
-			oprangeset(ACSETW, t)
+			oprange[ACSETW] = t
 
-			oprangeset(ACSETM, t)
-			oprangeset(ACSETMW, t)
+			oprange[ACSETM] = t
+			oprange[ACSETMW] = t
 
 		case AMOVD,
 			AMOVBU,
@@ -1570,20 +1590,20 @@ func buildop(ctxt *obj.Link) {
 			break
 
 		case AERET:
-			oprangeset(AWFE, t)
-			oprangeset(AWFI, t)
-			oprangeset(AYIELD, t)
-			oprangeset(ASEV, t)
-			oprangeset(ASEVL, t)
-			oprangeset(ADRPS, t)
+			oprange[AWFE] = t
+			oprange[AWFI] = t
+			oprange[AYIELD] = t
+			oprange[ASEV] = t
+			oprange[ASEVL] = t
+			oprange[ADRPS] = t
 
 		case ACBZ:
-			oprangeset(ACBZW, t)
-			oprangeset(ACBNZ, t)
-			oprangeset(ACBNZW, t)
+			oprange[ACBZW] = t
+			oprange[ACBNZ] = t
+			oprange[ACBNZW] = t
 
 		case ATBZ:
-			oprangeset(ATBNZ, t)
+			oprange[ATBNZ] = t
 
 		case AADR, AADRP:
 			break
@@ -1592,154 +1612,154 @@ func buildop(ctxt *obj.Link) {
 			break
 
 		case ASVC:
-			oprangeset(AHLT, t)
-			oprangeset(AHVC, t)
-			oprangeset(ASMC, t)
-			oprangeset(ABRK, t)
-			oprangeset(ADCPS1, t)
-			oprangeset(ADCPS2, t)
-			oprangeset(ADCPS3, t)
+			oprange[AHLT] = t
+			oprange[AHVC] = t
+			oprange[ASMC] = t
+			oprange[ABRK] = t
+			oprange[ADCPS1] = t
+			oprange[ADCPS2] = t
+			oprange[ADCPS3] = t
 
 		case AFADDS:
-			oprangeset(AFADDD, t)
-			oprangeset(AFSUBS, t)
-			oprangeset(AFSUBD, t)
-			oprangeset(AFMULS, t)
-			oprangeset(AFMULD, t)
-			oprangeset(AFNMULS, t)
-			oprangeset(AFNMULD, t)
-			oprangeset(AFDIVS, t)
-			oprangeset(AFMAXD, t)
-			oprangeset(AFMAXS, t)
-			oprangeset(AFMIND, t)
-			oprangeset(AFMINS, t)
-			oprangeset(AFMAXNMD, t)
-			oprangeset(AFMAXNMS, t)
-			oprangeset(AFMINNMD, t)
-			oprangeset(AFMINNMS, t)
-			oprangeset(AFDIVD, t)
+			oprange[AFADDD] = t
+			oprange[AFSUBS] = t
+			oprange[AFSUBD] = t
+			oprange[AFMULS] = t
+			oprange[AFMULD] = t
+			oprange[AFNMULS] = t
+			oprange[AFNMULD] = t
+			oprange[AFDIVS] = t
+			oprange[AFMAXD] = t
+			oprange[AFMAXS] = t
+			oprange[AFMIND] = t
+			oprange[AFMINS] = t
+			oprange[AFMAXNMD] = t
+			oprange[AFMAXNMS] = t
+			oprange[AFMINNMD] = t
+			oprange[AFMINNMS] = t
+			oprange[AFDIVD] = t
 
 		case AFCVTSD:
-			oprangeset(AFCVTDS, t)
-			oprangeset(AFABSD, t)
-			oprangeset(AFABSS, t)
-			oprangeset(AFNEGD, t)
-			oprangeset(AFNEGS, t)
-			oprangeset(AFSQRTD, t)
-			oprangeset(AFSQRTS, t)
-			oprangeset(AFRINTNS, t)
-			oprangeset(AFRINTND, t)
-			oprangeset(AFRINTPS, t)
-			oprangeset(AFRINTPD, t)
-			oprangeset(AFRINTMS, t)
-			oprangeset(AFRINTMD, t)
-			oprangeset(AFRINTZS, t)
-			oprangeset(AFRINTZD, t)
-			oprangeset(AFRINTAS, t)
-			oprangeset(AFRINTAD, t)
-			oprangeset(AFRINTXS, t)
-			oprangeset(AFRINTXD, t)
-			oprangeset(AFRINTIS, t)
-			oprangeset(AFRINTID, t)
-			oprangeset(AFCVTDH, t)
-			oprangeset(AFCVTHS, t)
-			oprangeset(AFCVTHD, t)
-			oprangeset(AFCVTSH, t)
+			oprange[AFCVTDS] = t
+			oprange[AFABSD] = t
+			oprange[AFABSS] = t
+			oprange[AFNEGD] = t
+			oprange[AFNEGS] = t
+			oprange[AFSQRTD] = t
+			oprange[AFSQRTS] = t
+			oprange[AFRINTNS] = t
+			oprange[AFRINTND] = t
+			oprange[AFRINTPS] = t
+			oprange[AFRINTPD] = t
+			oprange[AFRINTMS] = t
+			oprange[AFRINTMD] = t
+			oprange[AFRINTZS] = t
+			oprange[AFRINTZD] = t
+			oprange[AFRINTAS] = t
+			oprange[AFRINTAD] = t
+			oprange[AFRINTXS] = t
+			oprange[AFRINTXD] = t
+			oprange[AFRINTIS] = t
+			oprange[AFRINTID] = t
+			oprange[AFCVTDH] = t
+			oprange[AFCVTHS] = t
+			oprange[AFCVTHD] = t
+			oprange[AFCVTSH] = t
 
 		case AFCMPS:
-			oprangeset(AFCMPD, t)
-			oprangeset(AFCMPES, t)
-			oprangeset(AFCMPED, t)
+			oprange[AFCMPD] = t
+			oprange[AFCMPES] = t
+			oprange[AFCMPED] = t
 
 		case AFCCMPS:
-			oprangeset(AFCCMPD, t)
-			oprangeset(AFCCMPES, t)
-			oprangeset(AFCCMPED, t)
+			oprange[AFCCMPD] = t
+			oprange[AFCCMPES] = t
+			oprange[AFCCMPED] = t
 
 		case AFCSELD:
-			oprangeset(AFCSELS, t)
+			oprange[AFCSELS] = t
 
 		case AFMOVS, AFMOVD:
 			break
 
 		case AFCVTZSD:
-			oprangeset(AFCVTZSDW, t)
-			oprangeset(AFCVTZSS, t)
-			oprangeset(AFCVTZSSW, t)
-			oprangeset(AFCVTZUD, t)
-			oprangeset(AFCVTZUDW, t)
-			oprangeset(AFCVTZUS, t)
-			oprangeset(AFCVTZUSW, t)
+			oprange[AFCVTZSDW] = t
+			oprange[AFCVTZSS] = t
+			oprange[AFCVTZSSW] = t
+			oprange[AFCVTZUD] = t
+			oprange[AFCVTZUDW] = t
+			oprange[AFCVTZUS] = t
+			oprange[AFCVTZUSW] = t
 
 		case ASCVTFD:
-			oprangeset(ASCVTFS, t)
-			oprangeset(ASCVTFWD, t)
-			oprangeset(ASCVTFWS, t)
-			oprangeset(AUCVTFD, t)
-			oprangeset(AUCVTFS, t)
-			oprangeset(AUCVTFWD, t)
-			oprangeset(AUCVTFWS, t)
+			oprange[ASCVTFS] = t
+			oprange[ASCVTFWD] = t
+			oprange[ASCVTFWS] = t
+			oprange[AUCVTFD] = t
+			oprange[AUCVTFS] = t
+			oprange[AUCVTFWD] = t
+			oprange[AUCVTFWS] = t
 
 		case ASYS:
-			oprangeset(AAT, t)
-			oprangeset(ADC, t)
-			oprangeset(AIC, t)
-			oprangeset(ATLBI, t)
+			oprange[AAT] = t
+			oprange[ADC] = t
+			oprange[AIC] = t
+			oprange[ATLBI] = t
 
 		case ASYSL, AHINT:
 			break
 
 		case ADMB:
-			oprangeset(ADSB, t)
-			oprangeset(AISB, t)
+			oprange[ADSB] = t
+			oprange[AISB] = t
 
 		case AMRS, AMSR:
 			break
 
 		case ALDAR:
-			oprangeset(ALDARW, t)
+			oprange[ALDARW] = t
 			fallthrough
 
 		case ALDXR:
-			oprangeset(ALDXRB, t)
-			oprangeset(ALDXRH, t)
-			oprangeset(ALDXRW, t)
+			oprange[ALDXRB] = t
+			oprange[ALDXRH] = t
+			oprange[ALDXRW] = t
 
 		case ALDAXR:
-			oprangeset(ALDAXRW, t)
+			oprange[ALDAXRW] = t
 
 		case ALDXP:
-			oprangeset(ALDXPW, t)
+			oprange[ALDXPW] = t
 
 		case ASTLR:
-			oprangeset(ASTLRW, t)
+			oprange[ASTLRW] = t
 
 		case ASTXR:
-			oprangeset(ASTXRB, t)
-			oprangeset(ASTXRH, t)
-			oprangeset(ASTXRW, t)
+			oprange[ASTXRB] = t
+			oprange[ASTXRH] = t
+			oprange[ASTXRW] = t
 
 		case ASTLXR:
-			oprangeset(ASTLXRW, t)
+			oprange[ASTLXRW] = t
 
 		case ASTXP:
-			oprangeset(ASTXPW, t)
+			oprange[ASTXPW] = t
 
 		case AAESD:
-			oprangeset(AAESE, t)
-			oprangeset(AAESMC, t)
-			oprangeset(AAESIMC, t)
-			oprangeset(ASHA1H, t)
-			oprangeset(ASHA1SU1, t)
-			oprangeset(ASHA256SU0, t)
+			oprange[AAESE] = t
+			oprange[AAESMC] = t
+			oprange[AAESIMC] = t
+			oprange[ASHA1H] = t
+			oprange[ASHA1SU1] = t
+			oprange[ASHA256SU0] = t
 
 		case ASHA1C:
-			oprangeset(ASHA1P, t)
-			oprangeset(ASHA1M, t)
-			oprangeset(ASHA1SU0, t)
-			oprangeset(ASHA256H, t)
-			oprangeset(ASHA256H2, t)
-			oprangeset(ASHA256SU1, t)
+			oprange[ASHA1P] = t
+			oprange[ASHA1M] = t
+			oprange[ASHA1SU0] = t
+			oprange[ASHA256H] = t
+			oprange[ASHA256H2] = t
+			oprange[ASHA256SU1] = t
 
 		case obj.ANOP,
 			obj.AUNDEF,
@@ -1811,7 +1831,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		break
 
 	case 1: /* op Rm,[Rn],Rd; default Rn=Rd -> op Rm<<0,[Rn,]Rd (shifted register) */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		rf := int(p.From.Reg)
 		rt := int(p.To.Reg)
@@ -1825,7 +1845,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(rf&31) << 16) | (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 2: /* add/sub $(uimm12|uimm24)[,R],R; cmp $(uimm12|uimm24),R */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		rt := int(p.To.Reg)
 		if p.To.Type == obj.TYPE_NONE {
@@ -1843,7 +1863,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 = oaddi(ctxt, int32(o1), v, r, rt)
 
 	case 3: /* op R<<n[,R],R (shifted register) */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		o1 |= uint32(p.From.Offset) /* includes reg, op, etc */
 		rt := int(p.To.Reg)
@@ -1859,7 +1879,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 4: /* mov $addcon, R; mov $recon, R; mov $racon, R */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		rt := int(p.To.Reg)
 		r := int(o.param)
@@ -1880,7 +1900,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= ((uint32(v) & 0xFFF) << 10) | (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 5: /* b s; bl s */
-		o1 = opbra(ctxt, p.As)
+		o1 = opbra(ctxt, int(p.As))
 
 		if p.To.Sym == nil {
 			o1 |= uint32(brdist(ctxt, p, 0, 26, 2))
@@ -1895,7 +1915,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		rel.Type = obj.R_CALLARM64
 
 	case 6: /* b ,O(R); bl ,O(R) */
-		o1 = opbrr(ctxt, p.As)
+		o1 = opbrr(ctxt, int(p.As))
 
 		o1 |= uint32(p.To.Reg&31) << 5
 		rel := obj.Addrel(ctxt.Cursym)
@@ -1904,7 +1924,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		rel.Type = obj.R_CALLIND
 
 	case 7: /* beq s */
-		o1 = opbra(ctxt, p.As)
+		o1 = opbra(ctxt, int(p.As))
 
 		o1 |= uint32(brdist(ctxt, p, 0, 19, 2) << 5)
 
@@ -1947,7 +1967,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 9: /* lsl Rm,[Rn],Rd -> lslv Rm, Rn, Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		r := int(p.Reg)
 		if r == 0 {
@@ -1956,7 +1976,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(p.From.Reg&31) << 16) | (uint32(r&31) << 5) | uint32(p.To.Reg&31)
 
 	case 10: /* brk/hvc/.../svc [$con] */
-		o1 = opimm(ctxt, p.As)
+		o1 = opimm(ctxt, int(p.As))
 
 		if p.To.Type != obj.TYPE_NONE {
 			o1 |= uint32((p.To.Offset & 0xffff) << 5)
@@ -1979,7 +1999,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 12: /* movT $vcon, reg */
-		o1 = omovlit(ctxt, p.As, p, &p.From, int(p.To.Reg))
+		o1 = omovlit(ctxt, int(p.As), p, &p.From, int(p.To.Reg))
 
 	case 13: /* addop $vcon, [R], R (64 bit literal); cmp $lcon,R -> addop $lcon,R, ZR */
 		o1 = omovlit(ctxt, AMOVD, p, &p.From, REGTMP)
@@ -1996,11 +2016,11 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			r = rt
 		}
 		if p.To.Type != obj.TYPE_NONE && (p.To.Reg == REGSP || r == REGSP) {
-			o2 = opxrrr(ctxt, p.As)
+			o2 = opxrrr(ctxt, int(p.As))
 			o2 |= REGTMP & 31 << 16
 			o2 |= LSL0_64
 		} else {
-			o2 = oprrr(ctxt, p.As)
+			o2 = oprrr(ctxt, int(p.As))
 			o2 |= REGTMP & 31 << 16 /* shift is 0 */
 		}
 
@@ -2026,7 +2046,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 15: /* mul/mneg/umulh/umull r,[r,]r; madd/msub Rm,Rn,Ra,Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		rf := int(p.From.Reg)
 		rt := int(p.To.Reg)
@@ -2049,7 +2069,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(rf&31) << 16) | (uint32(ra&31) << 10) | (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 16: /* XremY R[,R],R -> XdivY; XmsubY */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		rf := int(p.From.Reg)
 		rt := int(p.To.Reg)
@@ -2063,7 +2083,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o2 |= (uint32(rf&31) << 16) | (uint32(r&31) << 10) | (REGTMP & 31 << 5) | uint32(rt&31)
 
 	case 17: /* op Rm,[Rn],Rd; default Rn=ZR */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		rf := int(p.From.Reg)
 		rt := int(p.To.Reg)
@@ -2077,7 +2097,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(rf&31) << 16) | (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 18: /* csel cond,Rn,Rm,Rd; cinc/cinv/cneg cond,Rn,Rd; cset cond,Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		cond := int(p.From.Reg)
 		r := int(p.Reg)
@@ -2110,10 +2130,10 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		cond := int(p.From.Reg)
 		var rf int
 		if p.From3.Type == obj.TYPE_REG {
-			o1 = oprrr(ctxt, p.As)
+			o1 = oprrr(ctxt, int(p.As))
 			rf = int(p.From3.Reg) /* Rm */
 		} else {
-			o1 = opirr(ctxt, p.As)
+			o1 = opirr(ctxt, int(p.As))
 			rf = int(p.From3.Offset & 0x1F)
 		}
 
@@ -2127,10 +2147,10 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			r = int(o.param)
 		}
 		if v < 0 { /* unscaled 9-bit signed */
-			o1 = olsr9s(ctxt, int32(opstr9(ctxt, p.As)), v, r, int(p.From.Reg))
+			o1 = olsr9s(ctxt, int32(opstr9(ctxt, int(p.As))), v, r, int(p.From.Reg))
 		} else {
 			v = int32(offsetshift(ctxt, int64(v), int(o.a3)))
-			o1 = olsr12u(ctxt, int32(opstr12(ctxt, p.As)), v, r, int(p.From.Reg))
+			o1 = olsr12u(ctxt, int32(opstr12(ctxt, int(p.As))), v, r, int(p.From.Reg))
 		}
 
 	case 21: /* movT O(R),R -> ldrT */
@@ -2141,12 +2161,12 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			r = int(o.param)
 		}
 		if v < 0 { /* unscaled 9-bit signed */
-			o1 = olsr9s(ctxt, int32(opldr9(ctxt, p.As)), v, r, int(p.To.Reg))
+			o1 = olsr9s(ctxt, int32(opldr9(ctxt, int(p.As))), v, r, int(p.To.Reg))
 		} else {
 			v = int32(offsetshift(ctxt, int64(v), int(o.a1)))
 
 			//print("offset=%lld v=%ld a1=%d\n", instoffset, v, o->a1);
-			o1 = olsr12u(ctxt, int32(opldr12(ctxt, p.As)), v, r, int(p.To.Reg))
+			o1 = olsr12u(ctxt, int32(opldr12(ctxt, int(p.As))), v, r, int(p.To.Reg))
 		}
 
 	case 22: /* movT (R)O!,R; movT O(R)!, R -> ldrT */
@@ -2155,7 +2175,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if v < -256 || v > 255 {
 			ctxt.Diag("offset out of range\n%v", p)
 		}
-		o1 = opldrpp(ctxt, p.As)
+		o1 = opldrpp(ctxt, int(p.As))
 		if o.scond == C_XPOST {
 			o1 |= 1 << 10
 		} else {
@@ -2169,7 +2189,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if v < -256 || v > 255 {
 			ctxt.Diag("offset out of range\n%v", p)
 		}
-		o1 = LD2STR(opldrpp(ctxt, p.As))
+		o1 = LD2STR(opldrpp(ctxt, int(p.As)))
 		if o.scond == C_XPOST {
 			o1 |= 1 << 10
 		} else {
@@ -2185,35 +2205,32 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			if s {
 				ctxt.Diag("illegal SP reference\n%v", p)
 			}
-			o1 = oprrr(ctxt, p.As)
+			o1 = oprrr(ctxt, int(p.As))
 			o1 |= (uint32(rf&31) << 16) | (REGZERO & 31 << 5) | uint32(rt&31)
 		} else if s {
-			o1 = opirr(ctxt, p.As)
+			o1 = opirr(ctxt, int(p.As))
 			o1 |= (uint32(rf&31) << 5) | uint32(rt&31)
 		} else {
-			o1 = oprrr(ctxt, p.As)
+			o1 = oprrr(ctxt, int(p.As))
 			o1 |= (uint32(rf&31) << 16) | (REGZERO & 31 << 5) | uint32(rt&31)
 		}
 
 	case 25: /* negX Rs, Rd -> subX Rs<<0, ZR, Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		rf := int(p.From.Reg)
-		if rf == C_NONE {
-			rf = int(p.To.Reg)
-		}
 		rt := int(p.To.Reg)
 		o1 |= (uint32(rf&31) << 16) | (REGZERO & 31 << 5) | uint32(rt&31)
 
 	case 26: /* negX Rm<<s, Rd -> subX Rm<<s, ZR, Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		o1 |= uint32(p.From.Offset) /* includes reg, op, etc */
 		rt := int(p.To.Reg)
 		o1 |= (REGZERO & 31 << 5) | uint32(rt&31)
 
 	case 27: /* op Rm<<n[,Rn],Rd (extended register) */
-		o1 = opxrrr(ctxt, p.As)
+		o1 = opxrrr(ctxt, int(p.As))
 
 		if (p.From.Reg-obj.RBaseARM64)&REG_EXT != 0 {
 			ctxt.Diag("extended register not implemented\n%v", p)
@@ -2241,21 +2258,21 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if r == 0 {
 			r = int(p.To.Reg)
 		}
-		o2 = oprrr(ctxt, p.As)
+		o2 = oprrr(ctxt, int(p.As))
 		o2 |= REGTMP & 31 << 16 /* shift is 0 */
 		o2 |= uint32(r&31) << 5
 		o2 |= uint32(p.To.Reg & 31)
 
 	case 29: /* op Rn, Rd */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		o1 |= uint32(p.From.Reg&31)<<5 | uint32(p.To.Reg&31)
 
 	case 30: /* movT R,L(R) -> strT */
-		s := movesize(o.as)
+		s := movesize(int(o.as))
 
 		if s < 0 {
-			ctxt.Diag("unexpected long move, op %v tab %v\n%v", obj.Aconv(p.As), obj.Aconv(o.as), p)
+			ctxt.Diag("unexpected long move, op %v tab %v\n%v", obj.Aconv(int(p.As)), obj.Aconv(int(o.as)), p)
 		}
 		v := int32(regoff(ctxt, &p.To))
 		if v < 0 {
@@ -2276,13 +2293,13 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			r = int(o.param)
 		}
 		o1 = oaddi(ctxt, int32(opirr(ctxt, AADD)), hi, r, REGTMP)
-		o2 = olsr12u(ctxt, int32(opstr12(ctxt, p.As)), ((v-hi)>>uint(s))&0xFFF, REGTMP, int(p.From.Reg))
+		o2 = olsr12u(ctxt, int32(opstr12(ctxt, int(p.As))), ((v-hi)>>uint(s))&0xFFF, REGTMP, int(p.From.Reg))
 
 	case 31: /* movT L(R), R -> ldrT */
-		s := movesize(o.as)
+		s := movesize(int(o.as))
 
 		if s < 0 {
-			ctxt.Diag("unexpected long move, op %v tab %v\n%v", obj.Aconv(p.As), obj.Aconv(o.as), p)
+			ctxt.Diag("unexpected long move, op %v tab %v\n%v", obj.Aconv(int(p.As)), obj.Aconv(int(o.as)), p)
 		}
 		v := int32(regoff(ctxt, &p.From))
 		if v < 0 {
@@ -2303,7 +2320,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 			r = int(o.param)
 		}
 		o1 = oaddi(ctxt, int32(opirr(ctxt, AADD)), hi, r, REGTMP)
-		o2 = olsr12u(ctxt, int32(opldr12(ctxt, p.As)), ((v-hi)>>uint(s))&0xFFF, REGTMP, int(p.To.Reg))
+		o2 = olsr12u(ctxt, int32(opldr12(ctxt, int(p.As))), ((v-hi)>>uint(s))&0xFFF, REGTMP, int(p.To.Reg))
 
 	case 32: /* mov $con, R -> movz/movn */
 		r := 32
@@ -2336,7 +2353,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32((((d >> uint(s*16)) & 0xFFFF) << 5) | int64((uint32(s)&3)<<21) | int64(rt&31))
 
 	case 33: /* movk $uimm16 << pos */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		d := p.From.Offset
 		if (d >> 16) != 0 {
@@ -2412,7 +2429,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32(v)
 
 	case 38: /* clrex [$imm] */
-		o1 = opimm(ctxt, p.As)
+		o1 = opimm(ctxt, int(p.As))
 
 		if p.To.Type == obj.TYPE_NONE {
 			o1 |= 0xF << 8
@@ -2421,13 +2438,13 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 39: /* cbz R, rel */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		o1 |= uint32(p.From.Reg & 31)
 		o1 |= uint32(brdist(ctxt, p, 0, 19, 2) << 5)
 
 	case 40: /* tbz */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		v := int32(p.From.Offset)
 		if v < 0 || v > 63 {
@@ -2438,10 +2455,10 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32(p.Reg)
 
 	case 41: /* eret, nop, others with no operands */
-		o1 = op0(ctxt, p.As)
+		o1 = op0(ctxt, int(p.As))
 
 	case 42: /* bfm R,r,s,R */
-		o1 = opbfm(ctxt, p.As, int(p.From.Offset), int(p.From3.Offset), int(p.Reg), int(p.To.Reg))
+		o1 = opbfm(ctxt, int(p.As), int(p.From.Offset), int(p.From3.Offset), int(p.Reg), int(p.To.Reg))
 
 	case 43: /* bfm aliases */
 		r := int(p.From.Offset)
@@ -2495,13 +2512,13 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 44: /* extr $b, Rn, Rm, Rd */
-		o1 = opextr(ctxt, p.As, int32(p.From.Offset), int(p.From3.Reg), int(p.Reg), int(p.To.Reg))
+		o1 = opextr(ctxt, int(p.As), int32(p.From.Offset), int(p.From3.Reg), int(p.Reg), int(p.To.Reg))
 
 	case 45: /* sxt/uxt[bhw] R,R; movT R,R -> sxtT R,R */
 		rf := int(p.From.Reg)
 
 		rt := int(p.To.Reg)
-		as := p.As
+		as := int(p.As)
 		if rf == REGZERO {
 			as = AMOVWU /* clearer in disassembly */
 		}
@@ -2545,7 +2562,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 46: /* cls */
-		o1 = opbit(ctxt, p.As)
+		o1 = opbit(ctxt, int(p.As))
 
 		o1 |= uint32(p.From.Reg&31) << 5
 		o1 |= uint32(p.To.Reg & 31)
@@ -2560,7 +2577,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if r == 0 {
 			r = int(o.param)
 		}
-		o2 = olsxrr(ctxt, p.As, REGTMP, r, int(p.From.Reg))
+		o2 = olsxrr(ctxt, int(p.As), REGTMP, r, int(p.From.Reg))
 
 	case 48: /* movT V(R), R -> ldrT (huge offset) */
 		o1 = omovlit(ctxt, AMOVW, p, &p.From, REGTMP)
@@ -2572,10 +2589,10 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		if r == 0 {
 			r = int(o.param)
 		}
-		o2 = olsxrr(ctxt, p.As, REGTMP, r, int(p.To.Reg))
+		o2 = olsxrr(ctxt, int(p.As), REGTMP, r, int(p.To.Reg))
 
 	case 50: /* sys/sysl */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		if (p.From.Offset &^ int64(SYSARG4(0x7, 0xF, 0xF, 0x7))) != 0 {
 			ctxt.Diag("illegal SYS argument\n%v", p)
@@ -2590,14 +2607,14 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		}
 
 	case 51: /* dmb */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		if p.From.Type == obj.TYPE_CONST {
 			o1 |= uint32((p.From.Offset & 0xF) << 8)
 		}
 
 	case 52: /* hint */
-		o1 = opirr(ctxt, p.As)
+		o1 = opirr(ctxt, int(p.As))
 
 		o1 |= uint32((p.From.Offset & 0x7F) << 5)
 
@@ -2605,7 +2622,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		ctxt.Diag("bitmask immediate not implemented\n%v", p)
 
 	case 54: /* floating point arith */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		var rf int
 		if p.From.Type == obj.TYPE_CONST {
@@ -2630,7 +2647,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= (uint32(rf&31) << 16) | (uint32(r&31) << 5) | uint32(rt&31)
 
 	case 56: /* floating point compare */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		var rf int
 		if p.From.Type == obj.TYPE_CONST {
@@ -2643,7 +2660,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32(rf&31)<<16 | uint32(rt&31)<<5
 
 	case 57: /* floating point conditional compare */
-		o1 = oprrr(ctxt, p.As)
+		o1 = oprrr(ctxt, int(p.As))
 
 		cond := int(p.From.Reg)
 		nzcv := int(p.To.Offset)
@@ -2659,7 +2676,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32(rf&31)<<16 | uint32(cond)<<12 | uint32(rt&31)<<5 | uint32(nzcv)
 
 	case 58: /* ldar/ldxr/ldaxr */
-		o1 = opload(ctxt, p.As)
+		o1 = opload(ctxt, int(p.As))
 
 		o1 |= 0x1F << 16
 		o1 |= uint32(p.From.Reg) << 5
@@ -2671,7 +2688,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		o1 |= uint32(p.To.Reg & 31)
 
 	case 59: /* stxr/stlxr */
-		o1 = opstore(ctxt, p.As)
+		o1 = opstore(ctxt, int(p.As))
 
 		if p.RegTo2 != obj.REG_NONE {
 			o1 |= uint32(p.RegTo2&31) << 16
@@ -2704,7 +2721,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		rel.Sym = p.To.Sym
 		rel.Add = p.To.Offset
 		rel.Type = obj.R_ADDRARM64
-		o3 = olsr12u(ctxt, int32(opstr12(ctxt, p.As)), 0, REGTMP, int(p.From.Reg))
+		o3 = olsr12u(ctxt, int32(opstr12(ctxt, int(p.As))), 0, REGTMP, int(p.From.Reg))
 
 	case 65: /* movT addr,R -> adrp + add + movT (REGTMP), R */
 		o1 = ADR(1, 0, REGTMP)
@@ -2715,7 +2732,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 		rel.Sym = p.From.Sym
 		rel.Add = p.From.Offset
 		rel.Type = obj.R_ADDRARM64
-		o3 = olsr12u(ctxt, int32(opldr12(ctxt, p.As)), 0, REGTMP, int(p.To.Reg))
+		o3 = olsr12u(ctxt, int32(opldr12(ctxt, int(p.As))), 0, REGTMP, int(p.To.Reg))
 
 	case 66: /* ldp O(R)!, (r1, r2); ldp (R)O!, (r1, r2) */
 		v := int32(p.From.Offset)
@@ -2794,7 +2811,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
 
 	// This is supposed to be something that stops execution.
 	// It's not supposed to be reached, ever, but if it is, we'd
-	// like to be able to tell how we got there. Assemble as
+	// like to be able to tell how we got there.  Assemble as
 	// 0xbea71700 which is guaranteed to raise undefined instruction
 	// exception.
 	case 90:
@@ -2816,7 +2833,7 @@ func asmout(ctxt *obj.Link, p *obj.Prog, o *Optab, out []uint32) {
  * also op Rn -> Rt
  * also Rm*Rn op Ra -> Rd
  */
-func oprrr(ctxt *obj.Link, a obj.As) uint32 {
+func oprrr(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case AADC:
 		return S64 | 0<<30 | 0<<29 | 0xd0<<21 | 0<<10
@@ -3339,7 +3356,7 @@ func oprrr(ctxt *obj.Link, a obj.As) uint32 {
  * imm -> Rd
  * imm op Rn -> Rd
  */
-func opirr(ctxt *obj.Link, a obj.As) uint32 {
+func opirr(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	/* op $addcon, Rn, Rd */
 	case AMOVD, AADD:
@@ -3522,7 +3539,7 @@ func opirr(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opbit(ctxt *obj.Link, a obj.As) uint32 {
+func opbit(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ACLS:
 		return S64 | OPBIT(5)
@@ -3566,7 +3583,7 @@ func opbit(ctxt *obj.Link, a obj.As) uint32 {
 /*
  * add/subtract extended register
  */
-func opxrrr(ctxt *obj.Link, a obj.As) uint32 {
+func opxrrr(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case AADD:
 		return S64 | 0<<30 | 0<<29 | 0x0b<<24 | 0<<22 | 1<<21 | LSL0_64
@@ -3597,7 +3614,7 @@ func opxrrr(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opimm(ctxt *obj.Link, a obj.As) uint32 {
+func opimm(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ASVC:
 		return 0xD4<<24 | 0<<21 | 1 /* imm16<<5 */
@@ -3654,7 +3671,7 @@ func brdist(ctxt *obj.Link, p *obj.Prog, preshift int, flen int, shift int) int6
 /*
  * pc-relative branches
  */
-func opbra(ctxt *obj.Link, a obj.As) uint32 {
+func opbra(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ABEQ:
 		return OPBcc(0x0)
@@ -3717,7 +3734,7 @@ func opbra(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opbrr(ctxt *obj.Link, a obj.As) uint32 {
+func opbrr(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ABL:
 		return OPBLR(1) /* BLR */
@@ -3734,7 +3751,7 @@ func opbrr(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func op0(ctxt *obj.Link, a obj.As) uint32 {
+func op0(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ADRPS:
 		return 0x6B<<25 | 5<<21 | 0x1F<<16 | 0x1F<<5
@@ -3769,7 +3786,7 @@ func op0(ctxt *obj.Link, a obj.As) uint32 {
 /*
  * register offset
  */
-func opload(ctxt *obj.Link, a obj.As) uint32 {
+func opload(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ALDAR:
 		return LDSTX(3, 1, 1, 0, 1) | 0x1F<<10
@@ -3830,7 +3847,7 @@ func opload(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opstore(ctxt *obj.Link, a obj.As) uint32 {
+func opstore(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case ASTLR:
 		return LDSTX(3, 1, 0, 0, 1) | 0x1F<<10
@@ -3911,7 +3928,7 @@ func olsr12u(ctxt *obj.Link, o int32, v int32, b int, r int) uint32 {
 	return uint32(o)
 }
 
-func opldr12(ctxt *obj.Link, a obj.As) uint32 {
+func opldr12(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case AMOVD:
 		return LDSTR12U(3, 0, 1) /* imm12<<10 | Rn<<5 | Rt */
@@ -3945,7 +3962,7 @@ func opldr12(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opstr12(ctxt *obj.Link, a obj.As) uint32 {
+func opstr12(ctxt *obj.Link, a int) uint32 {
 	return LD2STR(opldr12(ctxt, a))
 }
 
@@ -3962,7 +3979,7 @@ func olsr9s(ctxt *obj.Link, o int32, v int32, b int, r int) uint32 {
 	return uint32(o)
 }
 
-func opldr9(ctxt *obj.Link, a obj.As) uint32 {
+func opldr9(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case AMOVD:
 		return LDSTR9S(3, 0, 1) /* simm9<<12 | Rn<<5 | Rt */
@@ -3996,11 +4013,11 @@ func opldr9(ctxt *obj.Link, a obj.As) uint32 {
 	return 0
 }
 
-func opstr9(ctxt *obj.Link, a obj.As) uint32 {
+func opstr9(ctxt *obj.Link, a int) uint32 {
 	return LD2STR(opldr9(ctxt, a))
 }
 
-func opldrpp(ctxt *obj.Link, a obj.As) uint32 {
+func opldrpp(ctxt *obj.Link, a int) uint32 {
 	switch a {
 	case AMOVD:
 		return 3<<30 | 7<<27 | 0<<26 | 0<<24 | 1<<22 /* simm9<<12 | Rn<<5 | Rt */
@@ -4031,7 +4048,7 @@ func opldrpp(ctxt *obj.Link, a obj.As) uint32 {
 /*
  * load/store register (extended register)
  */
-func olsxrr(ctxt *obj.Link, as obj.As, rt int, r1 int, r2 int) uint32 {
+func olsxrr(ctxt *obj.Link, as int, rt int, r1 int, r2 int) uint32 {
 	ctxt.Diag("need load/store extended register\n%v", ctxt.Curp)
 	return 0xffffffff
 }
@@ -4052,7 +4069,7 @@ func oaddi(ctxt *obj.Link, o1 int32, v int32, r int, rt int) uint32 {
 /*
  * load a a literal value into dr
  */
-func omovlit(ctxt *obj.Link, as obj.As, p *obj.Prog, a *obj.Addr, dr int) uint32 {
+func omovlit(ctxt *obj.Link, as int, p *obj.Prog, a *obj.Addr, dr int) uint32 {
 	var o1 int32
 	if p.Pcond == nil { /* not in literal pool */
 		aclass(ctxt, a)
@@ -4100,7 +4117,7 @@ func omovlit(ctxt *obj.Link, as obj.As, p *obj.Prog, a *obj.Addr, dr int) uint32
 	return uint32(o1)
 }
 
-func opbfm(ctxt *obj.Link, a obj.As, r int, s int, rf int, rt int) uint32 {
+func opbfm(ctxt *obj.Link, a int, r int, s int, rf int, rt int) uint32 {
 	var c uint32
 	o := opirr(ctxt, a)
 	if (o & (1 << 31)) == 0 {
@@ -4120,7 +4137,7 @@ func opbfm(ctxt *obj.Link, a obj.As, r int, s int, rf int, rt int) uint32 {
 	return o
 }
 
-func opextr(ctxt *obj.Link, a obj.As, v int32, rn int, rm int, rt int) uint32 {
+func opextr(ctxt *obj.Link, a int, v int32, rn int, rm int, rt int) uint32 {
 	var c uint32
 	o := opirr(ctxt, a)
 	if (o & (1 << 31)) != 0 {
@@ -4141,7 +4158,7 @@ func opextr(ctxt *obj.Link, a obj.As, v int32, rn int, rm int, rt int) uint32 {
 /*
  * size in log2(bytes)
  */
-func movesize(a obj.As) int {
+func movesize(a int) int {
 	switch a {
 	case AMOVD:
 		return 3

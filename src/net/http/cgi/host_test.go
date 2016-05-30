@@ -8,7 +8,6 @@ package cgi
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -499,23 +498,6 @@ func TestEnvOverride(t *testing.T) {
 		"env-PATH":            "/wibble",
 	}
 	runCgiTest(t, h, "GET /test.cgi HTTP/1.0\nHost: example.com\n\n", expectedMap)
-}
-
-func TestHandlerStderr(t *testing.T) {
-	check(t)
-	var stderr bytes.Buffer
-	h := &Handler{
-		Path:   "testdata/test.cgi",
-		Root:   "/test.cgi",
-		Stderr: &stderr,
-	}
-
-	rw := httptest.NewRecorder()
-	req := newRequest("GET /test.cgi?writestderr=1 HTTP/1.0\nHost: example.com\n\n")
-	h.ServeHTTP(rw, req)
-	if got, want := stderr.String(), "Hello, stderr!\n"; got != want {
-		t.Errorf("Stderr = %q; want %q", got, want)
-	}
 }
 
 func TestRemoveLeadingDuplicates(t *testing.T) {

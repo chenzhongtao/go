@@ -5,7 +5,7 @@
 package sys
 
 const (
-	ArchFamily    = ARM64
+	TheChar       = '7'
 	BigEndian     = 0
 	CacheLineSize = 32
 	PhysPageSize  = 65536

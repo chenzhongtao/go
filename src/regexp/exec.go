@@ -19,7 +19,7 @@ type queue struct {
 // A entry is an entry on a queue.
 // It holds both the instruction pc and the actual thread.
 // Some queue entries are just place holders so that the machine
-// knows it has considered that pc. Such entries have t == nil.
+// knows it has considered that pc.  Such entries have t == nil.
 type entry struct {
 	pc uint32
 	t  *thread
@@ -107,6 +107,14 @@ func (m *machine) alloc(i *syntax.Inst) *thread {
 	return t
 }
 
+// free returns t to the free pool.
+func (m *machine) free(t *thread) {
+	m.inputBytes.str = nil
+	m.inputString.str = ""
+	m.inputReader.r = nil
+	m.pool = append(m.pool, t)
+}
+
 // match runs the machine over the input starting at pos.
 // It reports whether a match was found.
 // If so, m.matchcap holds the submatch information.
@@ -184,6 +192,7 @@ func (m *machine) match(i input, pos int) bool {
 func (m *machine) clear(q *queue) {
 	for _, d := range q.dense {
 		if d.t != nil {
+			// m.free(d.t)
 			m.pool = append(m.pool, d.t)
 		}
 	}
@@ -204,6 +213,7 @@ func (m *machine) step(runq, nextq *queue, pos, nextPos int, c rune, nextCond sy
 			continue
 		}
 		if longest && m.matched && len(t.cap) > 0 && m.matchcap[0] < t.cap[0] {
+			// m.free(t)
 			m.pool = append(m.pool, t)
 			continue
 		}
@@ -222,6 +232,7 @@ func (m *machine) step(runq, nextq *queue, pos, nextPos int, c rune, nextCond sy
 				// First-match mode: cut off all lower-priority threads.
 				for _, d := range runq.dense[j+1:] {
 					if d.t != nil {
+						// m.free(d.t)
 						m.pool = append(m.pool, d.t)
 					}
 				}
@@ -242,6 +253,7 @@ func (m *machine) step(runq, nextq *queue, pos, nextPos int, c rune, nextCond sy
 			t = m.add(nextq, i.Out, nextPos, t.cap, nextCond, t)
 		}
 		if t != nil {
+			// m.free(t)
 			m.pool = append(m.pool, t)
 		}
 	}

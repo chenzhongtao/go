@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors. All rights reserved.
+//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,12 +33,6 @@ package x86
 import "cmd/internal/obj"
 
 //go:generate go run ../stringer.go -i $GOFILE -o anames.go -p x86
-
-const (
-	/* mark flags */
-	DONE          = 1 << iota
-	PRESERVEFLAGS // not allowed to clobber flags
-)
 
 /*
  *	amd64
@@ -120,23 +114,23 @@ const (
 	AINTO
 	AIRETL
 	AIRETW
-	AJCC // >= unsigned
-	AJCS // < unsigned
+	AJCC
+	AJCS
 	AJCXZL
-	AJEQ // == (zero)
-	AJGE // >= signed
-	AJGT // > signed
-	AJHI // > unsigned
-	AJLE // <= signed
-	AJLS // <= unsigned
-	AJLT // < signed
-	AJMI // sign bit set (negative)
-	AJNE // != (nonzero)
-	AJOC // overflow clear
-	AJOS // overflow set
-	AJPC // parity clear
-	AJPL // sign bit clear (positive)
-	AJPS // parity set
+	AJEQ
+	AJGE
+	AJGT
+	AJHI
+	AJLE
+	AJLS
+	AJLT
+	AJMI
+	AJNE
+	AJOC
+	AJOS
+	AJPC
+	AJPL
+	AJPS
 	ALAHF
 	ALARL
 	ALARW
@@ -295,6 +289,8 @@ const (
 	AFMOVX
 	AFMOVXP
 
+	AFCOMB
+	AFCOMBP
 	AFCOMD
 	AFCOMDP
 	AFCOMDPP
@@ -624,7 +620,14 @@ const (
 	APADDUSW
 	APADDW
 	APAND
+	APANDB
+	APANDL
 	APANDN
+	APANDSB
+	APANDSW
+	APANDUSB
+	APANDUSW
+	APANDW
 	APAVGB
 	APAVGW
 	APCMPEQB
@@ -641,6 +644,23 @@ const (
 	APEXTRD
 	APEXTRQ
 	APEXTRW
+	APFACC
+	APFADD
+	APFCMPEQ
+	APFCMPGE
+	APFCMPGT
+	APFMAX
+	APFMIN
+	APFMUL
+	APFNACC
+	APFPNACC
+	APFRCP
+	APFRCPI2T
+	APFRCPIT1
+	APFRSQIT1
+	APFRSQRT
+	APFSUB
+	APFSUBR
 	APHADDD
 	APHADDSW
 	APHADDW
@@ -671,6 +691,7 @@ const (
 	APMOVZXWD
 	APMOVZXWQ
 	APMULDQ
+	APMULHRW
 	APMULHUW
 	APMULHW
 	APMULLD
@@ -701,6 +722,7 @@ const (
 	APSUBUSB
 	APSUBUSW
 	APSUBW
+	APSWAPL
 	APUNPCKHBW
 	APUNPCKHLQ
 	APUNPCKHQDQ
@@ -739,8 +761,11 @@ const (
 	AUNPCKLPS
 	AXORPD
 	AXORPS
-	APCMPESTRI
 
+	APF2IW
+	APF2IL
+	API2FW
+	API2FL
 	ARETFW
 	ARETFL
 	ARETFQ
@@ -785,24 +810,6 @@ const (
 	AVPAND
 	AVPTEST
 	AVPBROADCASTB
-	AVPSHUFB
-	AVPSHUFD
-	AVPERM2F128
-	AVPALIGNR
-	AVPADDQ
-	AVPADDD
-	AVPSRLDQ
-	AVPSLLDQ
-	AVPSRLQ
-	AVPSLLQ
-	AVPSRLD
-	AVPSLLD
-	AVPOR
-	AVPBLENDD
-	AVINSERTI128
-	AVPERM2I128
-	ARORXL
-	ARORXQ
 
 	// from 386
 	AJCXZW

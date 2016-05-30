@@ -1,14 +1,13 @@
-// Copyright 2015 The Go Authors. All rights reserved.
+// Copyright 2015 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-#include <process.h>
 #include <stdlib.h>
 #include <stdio.h>
 
 void gopanic(void);
 
-static unsigned int __attribute__((__stdcall__))
+static void*
 die(void* x)
 {
 	gopanic();

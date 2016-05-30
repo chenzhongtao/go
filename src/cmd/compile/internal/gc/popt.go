@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors. All rights reserved.
+//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -138,16 +138,15 @@ func fixjmp(firstp *obj.Prog) {
 			fmt.Printf("%v\n", p)
 		}
 		if p.As != obj.ACALL && p.To.Type == obj.TYPE_BRANCH && p.To.Val.(*obj.Prog) != nil && p.To.Val.(*obj.Prog).As == obj.AJMP {
-			if Debug['N'] == 0 {
-				p.To.Val = chasejmp(p.To.Val.(*obj.Prog), &jmploop)
-				if Debug['R'] != 0 && Debug['v'] != 0 {
-					fmt.Printf("->%v\n", p)
-				}
+			p.To.Val = chasejmp(p.To.Val.(*obj.Prog), &jmploop)
+			if Debug['R'] != 0 && Debug['v'] != 0 {
+				fmt.Printf("->%v\n", p)
 			}
 		}
 
 		p.Opt = dead
 	}
+
 	if Debug['R'] != 0 && Debug['v'] != 0 {
 		fmt.Printf("\n")
 	}
@@ -187,7 +186,7 @@ func fixjmp(firstp *obj.Prog) {
 
 	// pass 4: elide JMP to next instruction.
 	// only safe if there are no jumps to JMPs anymore.
-	if jmploop == 0 && Debug['N'] == 0 {
+	if jmploop == 0 {
 		var last *obj.Prog
 		for p := firstp; p != nil; p = p.Link {
 			if p.As == obj.AJMP && p.To.Type == obj.TYPE_BRANCH && p.To.Val == p.Link {
@@ -218,50 +217,22 @@ func fixjmp(firstp *obj.Prog) {
 // Control flow analysis. The Flow structures hold predecessor and successor
 // information as well as basic loop analysis.
 //
-//	graph = Flowstart(firstp, nil)
+//	graph = flowstart(firstp, 0);
 //	... use flow graph ...
-//	Flowend(graph) // free graph
+//	flowend(graph); // free graph
 //
 // Typical uses of the flow graph are to iterate over all the flow-relevant instructions:
 //
-//	for f := graph.Start; f != nil; f = f.Link {}
+//	for(f = graph->start; f != nil; f = f->link)
 //
 // or, given an instruction f, to iterate over all the predecessors, which is
-// f.P1 and this list:
+// f->p1 and this list:
 //
-//	for f2 := f.P2; f2 != nil; f2 = f2.P2link {}
+//	for(f2 = f->p2; f2 != nil; f2 = f2->p2link)
 //
-// The second argument (newData) to Flowstart specifies a func to create object
-// for every f.Data field, for use by the client.
-// If newData is nil, f.Data will be nil.
-
-type Graph struct {
-	Start *Flow
-	Num   int
-
-	// After calling flowrpo, rpo lists the flow nodes in reverse postorder,
-	// and each non-dead Flow node f has g->rpo[f->rpo] == f.
-	Rpo []*Flow
-}
-
-type Flow struct {
-	Prog   *obj.Prog // actual instruction
-	P1     *Flow     // predecessors of this instruction: p1,
-	P2     *Flow     // and then p2 linked though p2link.
-	P2link *Flow
-	S1     *Flow // successors of this instruction (at most two: s1 and s2).
-	S2     *Flow
-	Link   *Flow // next instruction in function code
-
-	Active int32 // usable by client
-
-	Id     int32  // sequence number in flow graph
-	Rpo    int32  // reverse post ordering
-	Loop   uint16 // x5 for every loop
-	Refset bool   // diagnostic generated
-
-	Data interface{} // for use by client
-}
+// The size argument to flowstart specifies an amount of zeroed memory
+// to allocate in every f->data field, for use by the client.
+// If size == 0, f->data will be nil.
 
 var flowmark int
 
@@ -269,19 +240,6 @@ var flowmark int
 // for which the flow code will build a graph. Functions larger than this limit
 // will not have flow graphs and consequently will not be optimized.
 const MaxFlowProg = 50000
-
-var ffcache []Flow // reusable []Flow, to reduce allocation
-
-func growffcache(n int) {
-	if n > cap(ffcache) {
-		n = (n * 5) / 4
-		if n > MaxFlowProg {
-			n = MaxFlowProg
-		}
-		ffcache = make([]Flow, n)
-	}
-	ffcache = ffcache[:n]
-}
 
 func Flowstart(firstp *obj.Prog, newData func() interface{}) *Graph {
 	// Count and mark instructions to annotate.
@@ -310,9 +268,7 @@ func Flowstart(firstp *obj.Prog, newData func() interface{}) *Graph {
 
 	// Allocate annotations and assign to instructions.
 	graph := new(Graph)
-
-	growffcache(nf)
-	ff := ffcache
+	ff := make([]Flow, nf)
 	start := &ff[0]
 	id := 0
 	var last *Flow
@@ -374,10 +330,6 @@ func Flowend(graph *Graph) {
 	for f := graph.Start; f != nil; f = f.Link {
 		f.Prog.Info.Flags = 0 // drop cached proginfo
 		f.Prog.Opt = nil
-	}
-	clear := ffcache[:graph.Num]
-	for i := range clear {
-		clear[i] = Flow{}
 	}
 }
 
@@ -500,8 +452,8 @@ func flowrpo(g *Graph) {
 		me = r1.Rpo
 		d = -1
 
-		// rpo2r[r.Rpo] == r protects against considering dead code,
-		// which has r.Rpo == 0.
+		// rpo2r[r->rpo] == r protects against considering dead code,
+		// which has r->rpo == 0.
 		if r1.P1 != nil && rpo2r[r1.P1.Rpo] == r1.P1 && r1.P1.Rpo < me {
 			d = r1.P1.Rpo
 		}
@@ -617,8 +569,8 @@ func mergetemp(firstp *obj.Prog) {
 
 	// Build list of all mergeable variables.
 	var vars []*TempVar
-	for _, n := range Curfn.Func.Dcl {
-		if canmerge(n) {
+	for l := Curfn.Func.Dcl; l != nil; l = l.Next {
+		if n := l.N; canmerge(n) {
 			v := &TempVar{}
 			vars = append(vars, v)
 			n.SetOpt(v)
@@ -713,7 +665,7 @@ func mergetemp(firstp *obj.Prog) {
 
 	// Traverse live range of each variable to set start, end.
 	// Each flood uses a new value of gen so that we don't have
-	// to clear all the r.Active words after each variable.
+	// to clear all the r->active words after each variable.
 	gen := uint32(0)
 
 	for _, v := range vars {
@@ -746,7 +698,7 @@ func mergetemp(firstp *obj.Prog) {
 	nfree := len(bystart)
 	for _, v := range bystart {
 		if debugmerge > 0 && Debug['v'] != 0 {
-			fmt.Printf("consider %v: removed=%t\n", Nconv(v.node, FmtSharp), v.removed)
+			fmt.Printf("consider %v: removed=%t\n", Nconv(v.node, obj.FmtSharp), v.removed)
 		}
 
 		if v.removed {
@@ -761,7 +713,7 @@ func mergetemp(firstp *obj.Prog) {
 		}
 
 		if debugmerge > 0 && Debug['v'] != 0 {
-			fmt.Printf("consider %v: removed=%t nfree=%d nvar=%d\n", Nconv(v.node, FmtSharp), v.removed, nfree, len(bystart))
+			fmt.Printf("consider %v: removed=%t nfree=%d nvar=%d\n", Nconv(v.node, obj.FmtSharp), v.removed, nfree, len(bystart))
 		}
 
 		// Find old temp to reuse if possible.
@@ -770,7 +722,7 @@ func mergetemp(firstp *obj.Prog) {
 		for j := nfree; j < len(inuse); j++ {
 			v1 := inuse[j]
 			if debugmerge > 0 && Debug['v'] != 0 {
-				fmt.Printf("consider %v: maybe %v: type=%v,%v addrtaken=%v,%v\n", Nconv(v.node, FmtSharp), Nconv(v1.node, FmtSharp), t, v1.node.Type, v.node.Addrtaken, v1.node.Addrtaken)
+				fmt.Printf("consider %v: maybe %v: type=%v,%v addrtaken=%v,%v\n", Nconv(v.node, obj.FmtSharp), Nconv(v1.node, obj.FmtSharp), t, v1.node.Type, v.node.Addrtaken, v1.node.Addrtaken)
 			}
 
 			// Require the types to match but also require the addrtaken bits to match.
@@ -806,7 +758,7 @@ func mergetemp(firstp *obj.Prog) {
 	if debugmerge > 0 && Debug['v'] != 0 {
 		fmt.Printf("%v [%d - %d]\n", Curfn.Func.Nname.Sym, len(vars), nkill)
 		for _, v := range vars {
-			fmt.Printf("var %v %v %d-%d", Nconv(v.node, FmtSharp), v.node.Type, v.start, v.end)
+			fmt.Printf("var %v %v %d-%d", Nconv(v.node, obj.FmtSharp), v.node.Type, v.start, v.end)
 			if v.addr {
 				fmt.Printf(" addr=true")
 			}
@@ -814,7 +766,7 @@ func mergetemp(firstp *obj.Prog) {
 				fmt.Printf(" removed=true")
 			}
 			if v.merge != nil {
-				fmt.Printf(" merge %v", Nconv(v.merge.node, FmtSharp))
+				fmt.Printf(" merge %v", Nconv(v.merge.node, obj.FmtSharp))
 			}
 			if v.start == v.end && v.def != nil {
 				fmt.Printf(" %v", v.def.Prog)
@@ -847,15 +799,22 @@ func mergetemp(firstp *obj.Prog) {
 	}
 
 	// Delete merged nodes from declaration list.
-	dcl := make([]*Node, 0, len(Curfn.Func.Dcl)-nkill)
-	for _, n := range Curfn.Func.Dcl {
+	for lp := &Curfn.Func.Dcl; ; {
+		l := *lp
+		if l == nil {
+			break
+		}
+
+		Curfn.Func.Dcl.End = l
+		n := l.N
 		v, _ := n.Opt().(*TempVar)
 		if v != nil && (v.merge != nil || v.removed) {
+			*lp = l.Next
 			continue
 		}
-		dcl = append(dcl, n)
+
+		lp = &l.Next
 	}
-	Curfn.Func.Dcl = dcl
 
 	// Clear aux structures.
 	for _, v := range vars {
@@ -932,7 +891,7 @@ func varkillwalk(v *TempVar, f0 *Flow, gen uint32) {
 // from memory without being rechecked. Other variables need to be checked on
 // each load.
 
-var killed int // f.Data is either nil or &killed
+var killed int // f->data is either nil or &killed
 
 func nilopt(firstp *obj.Prog) {
 	g := Flowstart(firstp, nil)
@@ -955,7 +914,7 @@ func nilopt(firstp *obj.Prog) {
 		ncheck++
 		if Thearch.Stackaddr(&p.From) {
 			if Debug_checknil != 0 && p.Lineno > 1 {
-				Warnl(p.Lineno, "removed nil check of SP address")
+				Warnl(int(p.Lineno), "removed nil check of SP address")
 			}
 			f.Data = &killed
 			continue
@@ -964,7 +923,7 @@ func nilopt(firstp *obj.Prog) {
 		nilwalkfwd(f)
 		if f.Data != nil {
 			if Debug_checknil != 0 && p.Lineno > 1 {
-				Warnl(p.Lineno, "removed nil check before indirect")
+				Warnl(int(p.Lineno), "removed nil check before indirect")
 			}
 			continue
 		}
@@ -972,7 +931,7 @@ func nilopt(firstp *obj.Prog) {
 		nilwalkback(f)
 		if f.Data != nil {
 			if Debug_checknil != 0 && p.Lineno > 1 {
-				Warnl(p.Lineno, "removed repeated nil check")
+				Warnl(int(p.Lineno), "removed repeated nil check")
 			}
 			continue
 		}

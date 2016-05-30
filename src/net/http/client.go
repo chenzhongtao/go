@@ -44,12 +44,9 @@ type Client struct {
 	// following an HTTP redirect. The arguments req and via are
 	// the upcoming request and the requests made already, oldest
 	// first. If CheckRedirect returns an error, the Client's Get
-	// method returns both the previous Response (with its Body
-	// closed) and CheckRedirect's error (wrapped in a url.Error)
-	// instead of issuing the Request req.
-	// As a special case, if CheckRedirect returns ErrUseLastResponse,
-	// then the most recent response is returned with its body
-	// unclosed, along with a nil error.
+	// method returns both the previous Response and
+	// CheckRedirect's error (wrapped in a url.Error) instead of
+	// issuing the Request req.
 	//
 	// If CheckRedirect is nil, the Client uses its default policy,
 	// which is to stop after 10 consecutive requests.
@@ -113,6 +110,10 @@ type RoundTripper interface {
 	RoundTrip(*Request) (*Response, error)
 }
 
+// Given a string of the form "host", "host:port", or "[ipv6::address]:port",
+// return true if the string includes a port.
+func hasPort(s string) bool { return strings.LastIndex(s, ":") > strings.LastIndex(s, "]") }
+
 // refererForURL returns a referer without any authentication info or
 // an empty string if lastReq scheme is https and newReq scheme is http.
 func refererForURL(lastReq, newReq *url.URL) string {
@@ -137,6 +138,14 @@ func refererForURL(lastReq, newReq *url.URL) string {
 	return referer
 }
 
+// Used in Send to implement io.ReadCloser by bundling together the
+// bufio.Reader through which we read the response, and the underlying
+// network connection.
+type readClose struct {
+	io.Reader
+	io.Closer
+}
+
 func (c *Client) send(req *Request, deadline time.Time) (*Response, error) {
 	if c.Jar != nil {
 		for _, cookie := range c.Jar.Cookies(req.URL) {
@@ -152,33 +161,28 @@ func (c *Client) send(req *Request, deadline time.Time) (*Response, error) {
 			c.Jar.SetCookies(req.URL, rc)
 		}
 	}
-	return resp, nil
+	return resp, err
 }
 
 // Do sends an HTTP request and returns an HTTP response, following
-// policy (such as redirects, cookies, auth) as configured on the
-// client.
+// policy (e.g. redirects, cookies, auth) as configured on the client.
 //
 // An error is returned if caused by client policy (such as
-// CheckRedirect), or failure to speak HTTP (such as a network
-// connectivity problem). A non-2xx status code doesn't cause an
-// error.
+// CheckRedirect), or if there was an HTTP protocol error.
+// A non-2xx response doesn't cause an error.
 //
-// If the returned error is nil, the Response will contain a non-nil
-// Body which the user is expected to close. If the Body is not
-// closed, the Client's underlying RoundTripper (typically Transport)
-// may not be able to re-use a persistent TCP connection to the server
-// for a subsequent "keep-alive" request.
+// When err is nil, resp always contains a non-nil resp.Body.
+//
+// Callers should close resp.Body when done reading from it. If
+// resp.Body is not closed, the Client's underlying RoundTripper
+// (typically Transport) may not be able to re-use a persistent TCP
+// connection to the server for a subsequent "keep-alive" request.
 //
 // The request Body, if non-nil, will be closed by the underlying
 // Transport, even on errors.
 //
-// On error, any Response can be ignored. A non-nil Response with a
-// non-nil error only occurs when CheckRedirect fails, and even then
-// the returned Response.Body is already closed.
-//
 // Generally Get, Post, or PostForm will be used instead of Do.
-func (c *Client) Do(req *Request) (*Response, error) {
+func (c *Client) Do(req *Request) (resp *Response, err error) {
 	method := valueOrDefault(req.Method, "GET")
 	if method == "GET" || method == "HEAD" {
 		return c.doFollowingRedirects(req, shouldRedirectGet)
@@ -233,7 +237,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (*Response, error)
 	}
 
 	// Most the callers of send (Get, Post, et al) don't need
-	// Headers, leaving it uninitialized. We guarantee to the
+	// Headers, leaving it uninitialized.  We guarantee to the
 	// Transport that this has been initialized, though.
 	if req.Header == nil {
 		forkReq()
@@ -420,111 +424,54 @@ func (c *Client) Get(url string) (resp *Response, err error) {
 
 func alwaysFalse() bool { return false }
 
-// ErrUseLastResponse can be returned by Client.CheckRedirect hooks to
-// control how redirects are processed. If returned, the next request
-// is not sent and the most recent response is returned with its body
-// unclosed.
-var ErrUseLastResponse = errors.New("net/http: use last response")
-
-// checkRedirect calls either the user's configured CheckRedirect
-// function, or the default.
-func (c *Client) checkRedirect(req *Request, via []*Request) error {
-	fn := c.CheckRedirect
-	if fn == nil {
-		fn = defaultCheckRedirect
+func (c *Client) doFollowingRedirects(ireq *Request, shouldRedirect func(int) bool) (resp *Response, err error) {
+	var base *url.URL
+	redirectChecker := c.CheckRedirect
+	if redirectChecker == nil {
+		redirectChecker = defaultCheckRedirect
 	}
-	return fn(req, via)
-}
+	var via []*Request
 
-func (c *Client) doFollowingRedirects(req *Request, shouldRedirect func(int) bool) (*Response, error) {
-	if req.URL == nil {
-		req.closeBody()
+	if ireq.URL == nil {
+		ireq.closeBody()
 		return nil, errors.New("http: nil Request.URL")
 	}
 
-	var (
-		deadline = c.deadline()
-		reqs     []*Request
-		resp     *Response
-	)
-	uerr := func(err error) error {
-		req.closeBody()
-		method := valueOrDefault(reqs[0].Method, "GET")
-		var urlStr string
-		if resp != nil && resp.Request != nil {
-			urlStr = resp.Request.URL.String()
-		} else {
-			urlStr = req.URL.String()
-		}
-		return &url.Error{
-			Op:  method[:1] + strings.ToLower(method[1:]),
-			URL: urlStr,
-			Err: err,
-		}
-	}
-	for {
-		// For all but the first request, create the next
-		// request hop and replace req.
-		if len(reqs) > 0 {
-			loc := resp.Header.Get("Location")
-			if loc == "" {
-				return nil, uerr(fmt.Errorf("%d response missing Location header", resp.StatusCode))
-			}
-			u, err := req.URL.Parse(loc)
-			if err != nil {
-				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, err))
-			}
-			ireq := reqs[0]
-			req = &Request{
-				Method:   ireq.Method,
-				Response: resp,
-				URL:      u,
-				Header:   make(Header),
-				Cancel:   ireq.Cancel,
-				ctx:      ireq.ctx,
-			}
+	req := ireq
+	deadline := c.deadline()
+
+	urlStr := "" // next relative or absolute URL to fetch (after first request)
+	redirectFailed := false
+	for redirect := 0; ; redirect++ {
+		if redirect != 0 {
+			nreq := new(Request)
+			nreq.Cancel = ireq.Cancel
+			nreq.Method = ireq.Method
 			if ireq.Method == "POST" || ireq.Method == "PUT" {
-				req.Method = "GET"
+				nreq.Method = "GET"
 			}
-			// Add the Referer header from the most recent
-			// request URL to the new one, if it's not https->http:
-			if ref := refererForURL(reqs[len(reqs)-1].URL, req.URL); ref != "" {
-				req.Header.Set("Referer", ref)
-			}
-			err = c.checkRedirect(req, reqs)
-
-			// Sentinel error to let users select the
-			// previous response, without closing its
-			// body. See Issue 10069.
-			if err == ErrUseLastResponse {
-				return resp, nil
-			}
-
-			// Close the previous response's body. But
-			// read at least some of the body so if it's
-			// small the underlying TCP connection will be
-			// re-used. No need to check for errors: if it
-			// fails, the Transport won't reuse it anyway.
-			const maxBodySlurpSize = 2 << 10
-			if resp.ContentLength == -1 || resp.ContentLength <= maxBodySlurpSize {
-				io.CopyN(ioutil.Discard, resp.Body, maxBodySlurpSize)
-			}
-			resp.Body.Close()
-
+			nreq.Header = make(Header)
+			nreq.URL, err = base.Parse(urlStr)
 			if err != nil {
-				// Special case for Go 1 compatibility: return both the response
-				// and an error if the CheckRedirect function failed.
-				// See https://golang.org/issue/3795
-				// The resp.Body has already been closed.
-				ue := uerr(err)
-				ue.(*url.Error).URL = loc
-				return resp, ue
+				break
 			}
+			if len(via) > 0 {
+				// Add the Referer header.
+				lastReq := via[len(via)-1]
+				if ref := refererForURL(lastReq.URL, nreq.URL); ref != "" {
+					nreq.Header.Set("Referer", ref)
+				}
+
+				err = redirectChecker(nreq, via)
+				if err != nil {
+					redirectFailed = true
+					break
+				}
+			}
+			req = nreq
 		}
 
-		reqs = append(reqs, req)
-
-		var err error
+		urlStr = req.URL.String()
 		if resp, err = c.send(req, deadline); err != nil {
 			if !deadline.IsZero() && !time.Now().Before(deadline) {
 				err = &httpError{
@@ -532,13 +479,46 @@ func (c *Client) doFollowingRedirects(req *Request, shouldRedirect func(int) boo
 					timeout: true,
 				}
 			}
-			return nil, uerr(err)
+			break
 		}
 
-		if !shouldRedirect(resp.StatusCode) {
-			return resp, nil
+		if shouldRedirect(resp.StatusCode) {
+			// Read the body if small so underlying TCP connection will be re-used.
+			// No need to check for errors: if it fails, Transport won't reuse it anyway.
+			const maxBodySlurpSize = 2 << 10
+			if resp.ContentLength == -1 || resp.ContentLength <= maxBodySlurpSize {
+				io.CopyN(ioutil.Discard, resp.Body, maxBodySlurpSize)
+			}
+			resp.Body.Close()
+			if urlStr = resp.Header.Get("Location"); urlStr == "" {
+				err = fmt.Errorf("%d response missing Location header", resp.StatusCode)
+				break
+			}
+			base = req.URL
+			via = append(via, req)
+			continue
 		}
+		return resp, nil
 	}
+
+	method := valueOrDefault(ireq.Method, "GET")
+	urlErr := &url.Error{
+		Op:  method[:1] + strings.ToLower(method[1:]),
+		URL: urlStr,
+		Err: err,
+	}
+
+	if redirectFailed {
+		// Special case for Go 1 compatibility: return both the response
+		// and an error if the CheckRedirect function failed.
+		// See https://golang.org/issue/3795
+		return resp, urlErr
+	}
+
+	if resp != nil {
+		resp.Body.Close()
+	}
+	return nil, urlErr
 }
 
 func defaultCheckRedirect(req *Request, via []*Request) error {

@@ -7,7 +7,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2008 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors. All rights reserved.
+//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,7 +31,7 @@ package mips
 
 import (
 	"cmd/internal/obj"
-	"cmd/internal/sys"
+	"encoding/binary"
 	"fmt"
 	"math"
 )
@@ -261,10 +261,11 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 	}
 
 	autosize := int32(0)
+	var o int
 	var p1 *obj.Prog
 	var p2 *obj.Prog
 	for p := cursym.Text; p != nil; p = p.Link {
-		o := p.As
+		o = int(p.As)
 		switch o {
 		case obj.ATEXT:
 			autosize = int32(textstksiz + 8)
@@ -302,7 +303,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 			}
 
 			if cursym.Text.Mark&LEAF != 0 {
-				cursym.Leaf = true
+				cursym.Leaf = 1
 				break
 			}
 
@@ -336,7 +337,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 				q.As = AMOVV
 				q.From.Type = obj.TYPE_MEM
 				q.From.Reg = REGG
-				q.From.Offset = 4 * int64(ctxt.Arch.PtrSize) // G.panic
+				q.From.Offset = 4 * int64(ctxt.Arch.Ptrsize) // G.panic
 				q.To.Type = obj.TYPE_REG
 				q.To.Reg = REG_R1
 
@@ -512,7 +513,7 @@ func preprocess(ctxt *obj.Link, cursym *obj.LSym) {
 	// instruction scheduling
 	q = nil          // p - 1
 	q1 = cursym.Text // top of block
-	o := 0           // count of instructions
+	o = 0            // count of instructions
 	for p = cursym.Text; p != nil; p = p1 {
 		p1 = p.Link
 		o++
@@ -559,9 +560,9 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32) *obj.Prog {
 	p.As = AMOVV
 	p.From.Type = obj.TYPE_MEM
 	p.From.Reg = REGG
-	p.From.Offset = 2 * int64(ctxt.Arch.PtrSize) // G.stackguard0
-	if ctxt.Cursym.Cfunc {
-		p.From.Offset = 3 * int64(ctxt.Arch.PtrSize) // G.stackguard1
+	p.From.Offset = 2 * int64(ctxt.Arch.Ptrsize) // G.stackguard0
+	if ctxt.Cursym.Cfunc != 0 {
+		p.From.Offset = 3 * int64(ctxt.Arch.Ptrsize) // G.stackguard1
 	}
 	p.To.Type = obj.TYPE_REG
 	p.To.Reg = REG_R1
@@ -690,7 +691,7 @@ func stacksplit(ctxt *obj.Link, p *obj.Prog, framesize int32) *obj.Prog {
 
 	p.As = AJAL
 	p.To.Type = obj.TYPE_BRANCH
-	if ctxt.Cursym.Cfunc {
+	if ctxt.Cursym.Cfunc != 0 {
 		p.To.Sym = obj.Linklookup(ctxt, "runtime.morestackc", 0)
 	} else if ctxt.Cursym.Text.From3.Offset&obj.NEEDCTXT == 0 {
 		p.To.Sym = obj.Linklookup(ctxt, "runtime.morestack_noctxt", 0)
@@ -1229,11 +1230,11 @@ func markregused(ctxt *obj.Link, s *Sch) {
 			s.used.ireg |= 1 << uint(c-REG_R0)
 		}
 	}
-	s.set.ireg &^= (1 << (REGZERO - REG_R0)) /* R0 can't be set */
+	s.set.ireg &^= (1 << (REGZERO - REG_R0)) /* R0 cant be set */
 }
 
 /*
- * test to see if two instructions can be
+ * test to see if 2 instrictions can be
  * interchanged without changing semantics
  */
 func depend(ctxt *obj.Link, sa, sb *Sch) bool {
@@ -1341,13 +1342,14 @@ func follow(ctxt *obj.Link, s *obj.LSym) {
 func xfol(ctxt *obj.Link, p *obj.Prog, last **obj.Prog) {
 	var q *obj.Prog
 	var r *obj.Prog
+	var a int
 	var i int
 
 loop:
 	if p == nil {
 		return
 	}
-	a := p.As
+	a = int(p.As)
 	if a == AJMP {
 		q = p.Pcond
 		if (p.Mark&NOSCHED != 0) || q != nil && (q.Mark&NOSCHED != 0) {
@@ -1379,7 +1381,7 @@ loop:
 			if q == *last || (q.Mark&NOSCHED != 0) {
 				break
 			}
-			a = q.As
+			a = int(q.As)
 			if a == obj.ANOP {
 				i--
 				continue
@@ -1400,7 +1402,7 @@ loop:
 				r = ctxt.NewProg()
 				*r = *p
 				if r.Mark&FOLL == 0 {
-					fmt.Printf("can't happen 1\n")
+					fmt.Printf("cant happen 1\n")
 				}
 				r.Mark |= FOLL
 				if p != q {
@@ -1425,7 +1427,7 @@ loop:
 					xfol(ctxt, r.Link, last)
 				}
 				if r.Pcond.Mark&FOLL == 0 {
-					fmt.Printf("can't happen 2\n")
+					fmt.Printf("cant happen 2\n")
 				}
 				return
 			}
@@ -1433,7 +1435,7 @@ loop:
 
 		a = AJMP
 		q = ctxt.NewProg()
-		q.As = a
+		q.As = int16(a)
 		q.Lineno = p.Lineno
 		q.To.Type = obj.TYPE_BRANCH
 		q.To.Offset = p.Pc
@@ -1469,17 +1471,27 @@ loop:
 }
 
 var Linkmips64 = obj.LinkArch{
-	Arch:       sys.ArchMIPS64,
+	ByteOrder:  binary.BigEndian,
+	Name:       "mips64",
+	Thechar:    '0',
 	Preprocess: preprocess,
 	Assemble:   span0,
 	Follow:     follow,
 	Progedit:   progedit,
+	Minlc:      4,
+	Ptrsize:    8,
+	Regsize:    8,
 }
 
 var Linkmips64le = obj.LinkArch{
-	Arch:       sys.ArchMIPS64LE,
+	ByteOrder:  binary.LittleEndian,
+	Name:       "mips64le",
+	Thechar:    '0',
 	Preprocess: preprocess,
 	Assemble:   span0,
 	Follow:     follow,
 	Progedit:   progedit,
+	Minlc:      4,
+	Ptrsize:    8,
+	Regsize:    8,
 }

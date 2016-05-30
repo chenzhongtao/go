@@ -1,9 +1,9 @@
-// Copyright 2010 The Go Authors. All rights reserved.
+// Copyright 2010 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package json implements encoding and decoding of JSON as defined in
-// RFC 4627. The mapping between JSON and Go values is described
+// Package json implements encoding and decoding of JSON objects as defined in
+// RFC 4627. The mapping between JSON objects and Go values is described
 // in the documentation for the Marshal and Unmarshal functions.
 //
 // See "JSON and Go" for an introduction to this package:
@@ -49,11 +49,10 @@ import (
 // The angle brackets "<" and ">" are escaped to "\u003c" and "\u003e"
 // to keep some browsers from misinterpreting JSON output as HTML.
 // Ampersand "&" is also escaped to "\u0026" for the same reason.
-// This escaping can be disabled using an Encoder with DisableHTMLEscaping.
 //
 // Array and slice values encode as JSON arrays, except that
 // []byte encodes as a base64-encoded string, and a nil slice
-// encodes as the null JSON value.
+// encodes as the null JSON object.
 //
 // Struct values encode as JSON objects. Each exported struct field
 // becomes a member of the object unless
@@ -117,31 +116,27 @@ import (
 // an anonymous struct field in both current and earlier versions, give the field
 // a JSON tag of "-".
 //
-// Map values encode as JSON objects. The map's key type must either be a
-// string, an integer type, or implement encoding.TextMarshaler. The map keys
-// are sorted and used as JSON object keys by applying the following rules,
-// subject to the UTF-8 coercion described for string values above:
-//   - string keys are used directly
-//   - encoding.TextMarshalers are marshaled
-//   - integer keys are converted to strings
+// Map values encode as JSON objects.
+// The map's key type must be string; the map keys are used as JSON object
+// keys, subject to the UTF-8 coercion described for string values above.
 //
 // Pointer values encode as the value pointed to.
-// A nil pointer encodes as the null JSON value.
+// A nil pointer encodes as the null JSON object.
 //
 // Interface values encode as the value contained in the interface.
-// A nil interface value encodes as the null JSON value.
+// A nil interface value encodes as the null JSON object.
 //
 // Channel, complex, and function values cannot be encoded in JSON.
 // Attempting to encode such a value causes Marshal to return
 // an UnsupportedTypeError.
 //
 // JSON cannot represent cyclic data structures and Marshal does not
-// handle them. Passing cyclic structures to Marshal will result in
+// handle them.  Passing cyclic structures to Marshal will result in
 // an infinite recursion.
 //
 func Marshal(v interface{}) ([]byte, error) {
 	e := &encodeState{}
-	err := e.marshal(v, encOpts{escapeHTML: true})
+	err := e.marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +192,7 @@ func HTMLEscape(dst *bytes.Buffer, src []byte) {
 	}
 }
 
-// Marshaler is the interface implemented by types that
+// Marshaler is the interface implemented by objects that
 // can marshal themselves into valid JSON.
 type Marshaler interface {
 	MarshalJSON() ([]byte, error)
@@ -264,7 +259,7 @@ func newEncodeState() *encodeState {
 	return new(encodeState)
 }
 
-func (e *encodeState) marshal(v interface{}, opts encOpts) (err error) {
+func (e *encodeState) marshal(v interface{}) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); ok {
@@ -276,7 +271,7 @@ func (e *encodeState) marshal(v interface{}, opts encOpts) (err error) {
 			err = r.(error)
 		}
 	}()
-	e.reflectValue(reflect.ValueOf(v), opts)
+	e.reflectValue(reflect.ValueOf(v))
 	return nil
 }
 
@@ -302,18 +297,11 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
-func (e *encodeState) reflectValue(v reflect.Value, opts encOpts) {
-	valueEncoder(v)(e, v, opts)
+func (e *encodeState) reflectValue(v reflect.Value) {
+	valueEncoder(v)(e, v, false)
 }
 
-type encOpts struct {
-	// quoted causes primitive fields to be encoded inside JSON strings.
-	quoted bool
-	// escapeHTML causes '<', '>', and '&' to be escaped in JSON strings.
-	escapeHTML bool
-}
-
-type encoderFunc func(e *encodeState, v reflect.Value, opts encOpts)
+type encoderFunc func(e *encodeState, v reflect.Value, quoted bool)
 
 var encoderCache struct {
 	sync.RWMutex
@@ -337,7 +325,7 @@ func typeEncoder(t reflect.Type) encoderFunc {
 
 	// To deal with recursive types, populate the map with an
 	// indirect func before we build it. This type waits on the
-	// real func (f) to be ready and then calls it. This indirect
+	// real func (f) to be ready and then calls it.  This indirect
 	// func is only used for recursive types.
 	encoderCache.Lock()
 	if encoderCache.m == nil {
@@ -345,9 +333,9 @@ func typeEncoder(t reflect.Type) encoderFunc {
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
-	encoderCache.m[t] = func(e *encodeState, v reflect.Value, opts encOpts) {
+	encoderCache.m[t] = func(e *encodeState, v reflect.Value, quoted bool) {
 		wg.Wait()
-		f(e, v, opts)
+		f(e, v, quoted)
 	}
 	encoderCache.Unlock()
 
@@ -417,11 +405,11 @@ func newTypeEncoder(t reflect.Type, allowAddr bool) encoderFunc {
 	}
 }
 
-func invalidValueEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+func invalidValueEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	e.WriteString("null")
 }
 
-func marshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func marshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
 		e.WriteString("null")
 		return
@@ -430,14 +418,14 @@ func marshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 	b, err := m.MarshalJSON()
 	if err == nil {
 		// copy JSON into buffer, checking validity.
-		err = compact(&e.Buffer, b, opts.escapeHTML)
+		err = compact(&e.Buffer, b, true)
 	}
 	if err != nil {
 		e.error(&MarshalerError{v.Type(), err})
 	}
 }
 
-func addrMarshalerEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+func addrMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
 		e.WriteString("null")
@@ -454,7 +442,7 @@ func addrMarshalerEncoder(e *encodeState, v reflect.Value, _ encOpts) {
 	}
 }
 
-func textMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func textMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Kind() == reflect.Ptr && v.IsNil() {
 		e.WriteString("null")
 		return
@@ -464,10 +452,10 @@ func textMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 	if err != nil {
 		e.error(&MarshalerError{v.Type(), err})
 	}
-	e.stringBytes(b, opts.escapeHTML)
+	e.stringBytes(b)
 }
 
-func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	va := v.Addr()
 	if va.IsNil() {
 		e.WriteString("null")
@@ -478,11 +466,11 @@ func addrTextMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 	if err != nil {
 		e.error(&MarshalerError{v.Type(), err})
 	}
-	e.stringBytes(b, opts.escapeHTML)
+	e.stringBytes(b)
 }
 
-func boolEncoder(e *encodeState, v reflect.Value, opts encOpts) {
-	if opts.quoted {
+func boolEncoder(e *encodeState, v reflect.Value, quoted bool) {
+	if quoted {
 		e.WriteByte('"')
 	}
 	if v.Bool() {
@@ -490,46 +478,46 @@ func boolEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 	} else {
 		e.WriteString("false")
 	}
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 }
 
-func intEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func intEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	b := strconv.AppendInt(e.scratch[:0], v.Int(), 10)
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 	e.Write(b)
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 }
 
-func uintEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func uintEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	b := strconv.AppendUint(e.scratch[:0], v.Uint(), 10)
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 	e.Write(b)
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 }
 
 type floatEncoder int // number of bits
 
-func (bits floatEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (bits floatEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	f := v.Float()
 	if math.IsInf(f, 0) || math.IsNaN(f) {
 		e.error(&UnsupportedValueError{v, strconv.FormatFloat(f, 'g', -1, int(bits))})
 	}
 	b := strconv.AppendFloat(e.scratch[:0], f, 'g', -1, int(bits))
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 	e.Write(b)
-	if opts.quoted {
+	if quoted {
 		e.WriteByte('"')
 	}
 }
@@ -539,7 +527,7 @@ var (
 	float64Encoder = (floatEncoder(64)).encode
 )
 
-func stringEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func stringEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.Type() == numberType {
 		numStr := v.String()
 		// In Go1.5 the empty string encodes to "0", while this is not a valid number literal
@@ -553,26 +541,26 @@ func stringEncoder(e *encodeState, v reflect.Value, opts encOpts) {
 		e.WriteString(numStr)
 		return
 	}
-	if opts.quoted {
+	if quoted {
 		sb, err := Marshal(v.String())
 		if err != nil {
 			e.error(err)
 		}
-		e.string(string(sb), opts.escapeHTML)
+		e.string(string(sb))
 	} else {
-		e.string(v.String(), opts.escapeHTML)
+		e.string(v.String())
 	}
 }
 
-func interfaceEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+func interfaceEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
 		e.WriteString("null")
 		return
 	}
-	e.reflectValue(v.Elem(), opts)
+	e.reflectValue(v.Elem())
 }
 
-func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+func unsupportedTypeEncoder(e *encodeState, v reflect.Value, quoted bool) {
 	e.error(&UnsupportedTypeError{v.Type()})
 }
 
@@ -581,7 +569,7 @@ type structEncoder struct {
 	fieldEncs []encoderFunc
 }
 
-func (se *structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (se *structEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	e.WriteByte('{')
 	first := true
 	for i, f := range se.fields {
@@ -594,10 +582,9 @@ func (se *structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
 		} else {
 			e.WriteByte(',')
 		}
-		e.string(f.name, opts.escapeHTML)
+		e.string(f.name)
 		e.WriteByte(':')
-		opts.quoted = f.quoted
-		se.fieldEncs[i](e, fv, opts)
+		se.fieldEncs[i](e, fv, f.quoted)
 	}
 	e.WriteByte('}')
 }
@@ -618,50 +605,34 @@ type mapEncoder struct {
 	elemEnc encoderFunc
 }
 
-func (me *mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (me *mapEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
 		e.WriteString("null")
 		return
 	}
 	e.WriteByte('{')
-
-	// Extract and sort the keys.
-	keys := v.MapKeys()
-	sv := make([]reflectWithString, len(keys))
-	for i, v := range keys {
-		sv[i].v = v
-		if err := sv[i].resolve(); err != nil {
-			e.error(&MarshalerError{v.Type(), err})
-		}
-	}
-	sort.Sort(byString(sv))
-
-	for i, kv := range sv {
+	var sv stringValues = v.MapKeys()
+	sort.Sort(sv)
+	for i, k := range sv {
 		if i > 0 {
 			e.WriteByte(',')
 		}
-		e.string(kv.s, opts.escapeHTML)
+		e.string(k.String())
 		e.WriteByte(':')
-		me.elemEnc(e, v.MapIndex(kv.v), opts)
+		me.elemEnc(e, v.MapIndex(k), false)
 	}
 	e.WriteByte('}')
 }
 
 func newMapEncoder(t reflect.Type) encoderFunc {
-	switch t.Key().Kind() {
-	case reflect.String,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-	default:
-		if !t.Key().Implements(textMarshalerType) {
-			return unsupportedTypeEncoder
-		}
+	if t.Key().Kind() != reflect.String {
+		return unsupportedTypeEncoder
 	}
 	me := &mapEncoder{typeEncoder(t.Elem())}
 	return me.encode
 }
 
-func encodeByteSlice(e *encodeState, v reflect.Value, _ encOpts) {
+func encodeByteSlice(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
 		e.WriteString("null")
 		return
@@ -688,21 +659,18 @@ type sliceEncoder struct {
 	arrayEnc encoderFunc
 }
 
-func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	if v.IsNil() {
 		e.WriteString("null")
 		return
 	}
-	se.arrayEnc(e, v, opts)
+	se.arrayEnc(e, v, false)
 }
 
 func newSliceEncoder(t reflect.Type) encoderFunc {
 	// Byte slices get special treatment; arrays don't.
 	if t.Elem().Kind() == reflect.Uint8 {
-		p := reflect.PtrTo(t.Elem())
-		if !p.Implements(marshalerType) && !p.Implements(textMarshalerType) {
-			return encodeByteSlice
-		}
+		return encodeByteSlice
 	}
 	enc := &sliceEncoder{newArrayEncoder(t)}
 	return enc.encode
@@ -712,14 +680,14 @@ type arrayEncoder struct {
 	elemEnc encoderFunc
 }
 
-func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, _ bool) {
 	e.WriteByte('[')
 	n := v.Len()
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			e.WriteByte(',')
 		}
-		ae.elemEnc(e, v.Index(i), opts)
+		ae.elemEnc(e, v.Index(i), false)
 	}
 	e.WriteByte(']')
 }
@@ -733,12 +701,12 @@ type ptrEncoder struct {
 	elemEnc encoderFunc
 }
 
-func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	if v.IsNil() {
 		e.WriteString("null")
 		return
 	}
-	pe.elemEnc(e, v.Elem(), opts)
+	pe.elemEnc(e, v.Elem(), quoted)
 }
 
 func newPtrEncoder(t reflect.Type) encoderFunc {
@@ -750,11 +718,11 @@ type condAddrEncoder struct {
 	canAddrEnc, elseEnc encoderFunc
 }
 
-func (ce *condAddrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+func (ce *condAddrEncoder) encode(e *encodeState, v reflect.Value, quoted bool) {
 	if v.CanAddr() {
-		ce.canAddrEnc(e, v, opts)
+		ce.canAddrEnc(e, v, quoted)
 	} else {
-		ce.elseEnc(e, v, opts)
+		ce.elseEnc(e, v, quoted)
 	}
 }
 
@@ -807,50 +775,23 @@ func typeByIndex(t reflect.Type, index []int) reflect.Type {
 	return t
 }
 
-type reflectWithString struct {
-	v reflect.Value
-	s string
-}
-
-func (w *reflectWithString) resolve() error {
-	if w.v.Kind() == reflect.String {
-		w.s = w.v.String()
-		return nil
-	}
-	if tm, ok := w.v.Interface().(encoding.TextMarshaler); ok {
-		buf, err := tm.MarshalText()
-		w.s = string(buf)
-		return err
-	}
-	switch w.v.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		w.s = strconv.FormatInt(w.v.Int(), 10)
-		return nil
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		w.s = strconv.FormatUint(w.v.Uint(), 10)
-		return nil
-	}
-	panic("unexpected map key type")
-}
-
-// byString is a slice of reflectWithString where the reflect.Value is either
-// a string or an encoding.TextMarshaler.
+// stringValues is a slice of reflect.Value holding *reflect.StringValue.
 // It implements the methods to sort by string.
-type byString []reflectWithString
+type stringValues []reflect.Value
 
-func (sv byString) Len() int           { return len(sv) }
-func (sv byString) Swap(i, j int)      { sv[i], sv[j] = sv[j], sv[i] }
-func (sv byString) Less(i, j int) bool { return sv[i].s < sv[j].s }
+func (sv stringValues) Len() int           { return len(sv) }
+func (sv stringValues) Swap(i, j int)      { sv[i], sv[j] = sv[j], sv[i] }
+func (sv stringValues) Less(i, j int) bool { return sv.get(i) < sv.get(j) }
+func (sv stringValues) get(i int) string   { return sv[i].String() }
 
 // NOTE: keep in sync with stringBytes below.
-func (e *encodeState) string(s string, escapeHTML bool) int {
+func (e *encodeState) string(s string) int {
 	len0 := e.Len()
 	e.WriteByte('"')
 	start := 0
 	for i := 0; i < len(s); {
 		if b := s[i]; b < utf8.RuneSelf {
-			if 0x20 <= b && b != '\\' && b != '"' &&
-				(!escapeHTML || b != '<' && b != '>' && b != '&') {
+			if 0x20 <= b && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
 				i++
 				continue
 			}
@@ -871,11 +812,10 @@ func (e *encodeState) string(s string, escapeHTML bool) int {
 				e.WriteByte('\\')
 				e.WriteByte('t')
 			default:
-				// This encodes bytes < 0x20 except for \t, \n and \r.
-				// If escapeHTML is set, it also escapes <, >, and &
-				// because they can lead to security holes when
-				// user-controlled strings are rendered into JSON
-				// and served to some browsers.
+				// This encodes bytes < 0x20 except for \n and \r,
+				// as well as <, > and &. The latter are escaped because they
+				// can lead to security holes when user-controlled strings
+				// are rendered into JSON and served to some browsers.
 				e.WriteString(`\u00`)
 				e.WriteByte(hex[b>>4])
 				e.WriteByte(hex[b&0xF])
@@ -921,14 +861,13 @@ func (e *encodeState) string(s string, escapeHTML bool) int {
 }
 
 // NOTE: keep in sync with string above.
-func (e *encodeState) stringBytes(s []byte, escapeHTML bool) int {
+func (e *encodeState) stringBytes(s []byte) int {
 	len0 := e.Len()
 	e.WriteByte('"')
 	start := 0
 	for i := 0; i < len(s); {
 		if b := s[i]; b < utf8.RuneSelf {
-			if 0x20 <= b && b != '\\' && b != '"' &&
-				(!escapeHTML || b != '<' && b != '>' && b != '&') {
+			if 0x20 <= b && b != '\\' && b != '"' && b != '<' && b != '>' && b != '&' {
 				i++
 				continue
 			}
@@ -949,11 +888,10 @@ func (e *encodeState) stringBytes(s []byte, escapeHTML bool) int {
 				e.WriteByte('\\')
 				e.WriteByte('t')
 			default:
-				// This encodes bytes < 0x20 except for \t, \n and \r.
-				// If escapeHTML is set, it also escapes <, >, and &
-				// because they can lead to security holes when
-				// user-controlled strings are rendered into JSON
-				// and served to some browsers.
+				// This encodes bytes < 0x20 except for \n and \r,
+				// as well as <, >, and &. The latter are escaped because they
+				// can lead to security holes when user-controlled strings
+				// are rendered into JSON and served to some browsers.
 				e.WriteString(`\u00`)
 				e.WriteByte(hex[b>>4])
 				e.WriteByte(hex[b&0xF])

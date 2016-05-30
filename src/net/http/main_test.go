@@ -5,6 +5,7 @@
 package http_test
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 )
+
+var flaky = flag.Bool("flaky", false, "run known-flaky tests too")
 
 func TestMain(m *testing.M) {
 	v := m.Run()
@@ -88,6 +91,12 @@ func setParallel(t *testing.T) {
 	}
 }
 
+func setFlaky(t *testing.T, issue int) {
+	if !*flaky {
+		t.Skipf("skipping known flaky test; see golang.org/issue/%d", issue)
+	}
+}
+
 func afterTest(t testing.TB) {
 	http.DefaultTransport.(*http.Transport).CloseIdleConnections()
 	if testing.Short() {
@@ -119,18 +128,4 @@ func afterTest(t testing.TB) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	t.Errorf("Test appears to have leaked %s:\n%s", bad, stacks)
-}
-
-// waitCondition reports whether fn eventually returned true,
-// checking immediately and then every checkEvery amount,
-// until waitFor has elapsed, at which point it returns false.
-func waitCondition(waitFor, checkEvery time.Duration, fn func() bool) bool {
-	deadline := time.Now().Add(waitFor)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return true
-		}
-		time.Sleep(checkEvery)
-	}
-	return false
 }

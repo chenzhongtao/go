@@ -16,8 +16,6 @@ import (
 // RWMutexes can be created as part of other
 // structures; the zero value for a RWMutex is
 // an unlocked mutex.
-//
-// An RWMutex must not be copied after first use.
 type RWMutex struct {
 	w           Mutex  // held if there are pending writers
 	writerSem   uint32 // semaphore for writers to wait for completing readers
@@ -96,11 +94,11 @@ func (rw *RWMutex) Lock() {
 	}
 }
 
-// Unlock unlocks rw for writing. It is a run-time error if rw is
+// Unlock unlocks rw for writing.  It is a run-time error if rw is
 // not locked for writing on entry to Unlock.
 //
 // As with Mutexes, a locked RWMutex is not associated with a particular
-// goroutine. One goroutine may RLock (Lock) an RWMutex and then
+// goroutine.  One goroutine may RLock (Lock) an RWMutex and then
 // arrange for another goroutine to RUnlock (Unlock) it.
 func (rw *RWMutex) Unlock() {
 	if race.Enabled {

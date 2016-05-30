@@ -5,7 +5,6 @@
 package main
 
 import (
-	"debug/dwarf"
 	"debug/gosym"
 	"flag"
 	"fmt"
@@ -15,13 +14,13 @@ import (
 	"sync"
 
 	"cmd/internal/objfile"
-	"cmd/internal/pprof/commands"
-	"cmd/internal/pprof/driver"
-	"cmd/internal/pprof/fetch"
-	"cmd/internal/pprof/plugin"
-	"cmd/internal/pprof/profile"
-	"cmd/internal/pprof/symbolizer"
-	"cmd/internal/pprof/symbolz"
+	"cmd/pprof/internal/commands"
+	"cmd/pprof/internal/driver"
+	"cmd/pprof/internal/fetch"
+	"cmd/pprof/internal/plugin"
+	"cmd/pprof/internal/profile"
+	"cmd/pprof/internal/symbolizer"
+	"cmd/pprof/internal/symbolz"
 )
 
 func main() {
@@ -173,9 +172,6 @@ type file struct {
 	sym  []objfile.Sym
 	file *objfile.File
 	pcln *gosym.Table
-
-	triedDwarf bool
-	dwarf      *dwarf.Data
 }
 
 func (f *file) Name() string {
@@ -201,94 +197,17 @@ func (f *file) SourceLine(addr uint64) ([]plugin.Frame, error) {
 		f.pcln = pcln
 	}
 	file, line, fn := f.pcln.PCToLine(addr)
-	if fn != nil {
-		frame := []plugin.Frame{
-			{
-				Func: fn.Name,
-				File: file,
-				Line: line,
-			},
-		}
-		return frame, nil
+	if fn == nil {
+		return nil, fmt.Errorf("no line information for PC=%#x", addr)
 	}
-
-	frames := f.dwarfSourceLine(addr)
-	if frames != nil {
-		return frames, nil
-	}
-
-	return nil, fmt.Errorf("no line information for PC=%#x", addr)
-}
-
-// dwarfSourceLine tries to get file/line information using DWARF.
-// This is for C functions that appear in the profile.
-// Returns nil if there is no information available.
-func (f *file) dwarfSourceLine(addr uint64) []plugin.Frame {
-	if f.dwarf == nil && !f.triedDwarf {
-		// Ignore any error--we don't care exactly why there
-		// is no DWARF info.
-		f.dwarf, _ = f.file.DWARF()
-		f.triedDwarf = true
-	}
-
-	if f.dwarf != nil {
-		r := f.dwarf.Reader()
-		unit, err := r.SeekPC(addr)
-		if err == nil {
-			if frames := f.dwarfSourceLineEntry(r, unit, addr); frames != nil {
-				return frames
-			}
-		}
-	}
-
-	return nil
-}
-
-// dwarfSourceLineEntry tries to get file/line information from a
-// DWARF compilation unit. Returns nil if it doesn't find anything.
-func (f *file) dwarfSourceLineEntry(r *dwarf.Reader, entry *dwarf.Entry, addr uint64) []plugin.Frame {
-	lines, err := f.dwarf.LineReader(entry)
-	if err != nil {
-		return nil
-	}
-	var lentry dwarf.LineEntry
-	if err := lines.SeekPC(addr, &lentry); err != nil {
-		return nil
-	}
-
-	// Try to find the function name.
-	name := ""
-FindName:
-	for entry, err := r.Next(); entry != nil && err == nil; entry, err = r.Next() {
-		if entry.Tag == dwarf.TagSubprogram {
-			ranges, err := f.dwarf.Ranges(entry)
-			if err != nil {
-				return nil
-			}
-			for _, pcs := range ranges {
-				if pcs[0] <= addr && addr < pcs[1] {
-					var ok bool
-					// TODO: AT_linkage_name, AT_MIPS_linkage_name.
-					name, ok = entry.Val(dwarf.AttrName).(string)
-					if ok {
-						break FindName
-					}
-				}
-			}
-		}
-	}
-
-	// TODO: Report inlined functions.
-
-	frames := []plugin.Frame{
+	frame := []plugin.Frame{
 		{
-			Func: name,
-			File: lentry.File.Name,
-			Line: lentry.Line,
+			Func: fn.Name,
+			File: file,
+			Line: line,
 		},
 	}
-
-	return frames
+	return frame, nil
 }
 
 func (f *file) Symbols(r *regexp.Regexp, addr uint64) ([]*plugin.Sym, error) {

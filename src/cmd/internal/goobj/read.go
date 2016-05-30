@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors. All rights reserved.
+// Copyright 2013 The Go Authors.  All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -43,7 +43,6 @@ const (
 	SRODATA    SymKind = obj.SRODATA
 	SFUNCTAB   SymKind = obj.SFUNCTAB
 	STYPELINK  SymKind = obj.STYPELINK
-	SITABLINK  SymKind = obj.SITABLINK
 	SSYMTAB    SymKind = obj.SSYMTAB // TODO: move to unmapped section
 	SPCLNTAB   SymKind = obj.SPCLNTAB
 	SELFROSECT SymKind = obj.SELFROSECT
@@ -107,7 +106,6 @@ var symKindStrings = []string{
 	STLSBSS:           "STLSBSS",
 	STYPE:             "STYPE",
 	STYPELINK:         "STYPELINK",
-	SITABLINK:         "SITABLINK",
 	SWINDOWS:          "SWINDOWS",
 	SXREF:             "SXREF",
 }
@@ -217,7 +215,6 @@ type FuncData struct {
 type Package struct {
 	ImportPath string   // import path denoting this package
 	Imports    []string // packages imported by this package
-	SymRefs    []SymID  // list of symbol names and versions referred to by this pack
 	Syms       []*Sym   // symbols defined by this package
 	MaxVersion int      // maximum Version in any SymID in Syms
 }
@@ -229,22 +226,24 @@ var (
 
 	errCorruptArchive   = errors.New("corrupt archive")
 	errTruncatedArchive = errors.New("truncated archive")
-	errCorruptObject    = errors.New("corrupt object file")
-	errNotObject        = errors.New("unrecognized object file format")
+	errNotArchive       = errors.New("unrecognized archive format")
+
+	errCorruptObject   = errors.New("corrupt object file")
+	errTruncatedObject = errors.New("truncated object file")
+	errNotObject       = errors.New("unrecognized object file format")
 )
 
 // An objReader is an object file reader.
 type objReader struct {
-	p          *Package
-	b          *bufio.Reader
-	f          io.ReadSeeker
-	err        error
-	offset     int64
-	dataOffset int64
-	limit      int64
-	tmp        [256]byte
-	pkg        string
-	pkgprefix  string
+	p         *Package
+	b         *bufio.Reader
+	f         io.ReadSeeker
+	err       error
+	offset    int64
+	limit     int64
+	tmp       [256]byte
+	pkg       string
+	pkgprefix string
 }
 
 // importPathToPrefix returns the prefix that will be used in the
@@ -290,9 +289,9 @@ func importPathToPrefix(s string) string {
 func (r *objReader) init(f io.ReadSeeker, p *Package) {
 	r.f = f
 	r.p = p
-	r.offset, _ = f.Seek(0, io.SeekCurrent)
-	r.limit, _ = f.Seek(0, io.SeekEnd)
-	f.Seek(r.offset, io.SeekStart)
+	r.offset, _ = f.Seek(0, 1)
+	r.limit, _ = f.Seek(0, 2)
+	f.Seek(r.offset, 0)
 	r.b = bufio.NewReader(f)
 	r.pkgprefix = importPathToPrefix(p.ImportPath) + "."
 }
@@ -391,11 +390,6 @@ func (r *objReader) readString() string {
 
 // readSymID reads a SymID from the input file.
 func (r *objReader) readSymID() SymID {
-	i := r.readInt()
-	return r.p.SymRefs[i]
-}
-
-func (r *objReader) readRef() {
 	name, vers := r.readString(), r.readInt()
 
 	// In a symbol name in an object file, "". denotes the
@@ -410,14 +404,15 @@ func (r *objReader) readRef() {
 	if vers != 0 {
 		vers = r.p.MaxVersion
 	}
-	r.p.SymRefs = append(r.p.SymRefs, SymID{name, vers})
+
+	return SymID{name, vers}
 }
 
 // readData reads a data reference from the input file.
 func (r *objReader) readData() Data {
 	n := r.readInt()
-	d := Data{Offset: r.dataOffset, Size: int64(n)}
-	r.dataOffset += int64(n)
+	d := Data{Offset: r.offset, Size: int64(n)}
+	r.skip(int64(n))
 	return d
 }
 
@@ -440,7 +435,7 @@ func (r *objReader) skip(n int64) {
 		r.readFull(r.tmp[:n])
 	} else {
 		// Seek, giving up buffered data.
-		_, err := r.f.Seek(r.offset+n, io.SeekStart)
+		_, err := r.f.Seek(r.offset+n, 0)
 		if err != nil {
 			r.error(err)
 		}
@@ -535,7 +530,7 @@ func (r *objReader) parseArchive() error {
 			return errCorruptArchive
 		}
 		switch name {
-		case "__.PKGDEF":
+		case "__.SYMDEF", "__.GOSYMDEF", "__.PKGDEF":
 			r.skip(size)
 		default:
 			oldLimit := r.limit
@@ -580,7 +575,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 	}
 
 	r.readFull(r.tmp[:8])
-	if !bytes.Equal(r.tmp[:8], []byte("\x00\x00go17ld")) {
+	if !bytes.Equal(r.tmp[:8], []byte("\x00\x00go13ld")) {
 		return r.error(errCorruptObject)
 	}
 
@@ -597,28 +592,6 @@ func (r *objReader) parseObject(prefix []byte) error {
 		}
 		r.p.Imports = append(r.p.Imports, s)
 	}
-
-	r.p.SymRefs = []SymID{{"", 0}}
-	for {
-		if b := r.readByte(); b != 0xfe {
-			if b != 0xff {
-				return r.error(errCorruptObject)
-			}
-			break
-		}
-
-		r.readRef()
-	}
-
-	dataLength := r.readInt()
-	r.readInt() // n relocations - ignore
-	r.readInt() // n pcdata - ignore
-	r.readInt() // n autom - ignore
-	r.readInt() // n funcdata - ignore
-	r.readInt() // n files - ignore
-
-	r.dataOffset = r.offset
-	r.skip(int64(dataLength))
 
 	// Symbols.
 	for {
@@ -645,7 +618,9 @@ func (r *objReader) parseObject(prefix []byte) error {
 			rel.Size = r.readInt()
 			rel.Type = r.readInt()
 			rel.Add = r.readInt()
+			r.readInt() // Xadd - ignored
 			rel.Sym = r.readSymID()
+			r.readSymID() // Xsym - ignored
 		}
 
 		if s.Kind == STEXT {
@@ -687,7 +662,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 	}
 
 	r.readFull(r.tmp[:7])
-	if !bytes.Equal(r.tmp[:7], []byte("\xffgo17ld")) {
+	if !bytes.Equal(r.tmp[:7], []byte("\xffgo13ld")) {
 		return r.error(errCorruptObject)
 	}
 

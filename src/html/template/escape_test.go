@@ -990,7 +990,7 @@ func TestErrors(t *testing.T) {
 			}
 			continue
 		}
-		if !strings.Contains(got, test.err) {
+		if strings.Index(got, test.err) == -1 {
 			t.Errorf("input=%q: error\n\t%q\ndoes not contain expected string\n\t%q", test.input, got, test.err)
 			continue
 		}

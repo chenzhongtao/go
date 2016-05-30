@@ -24,7 +24,7 @@ type runtimeTimer struct {
 
 // when is a helper function for setting the 'when' field of a runtimeTimer.
 // It returns what the time will be, in nanoseconds, Duration d in the future.
-// If d is negative, it is ignored. If the returned value would be less than
+// If d is negative, it is ignored.  If the returned value would be less than
 // zero because of an overflow, MaxInt64 is returned.
 func when(d Duration) int64 {
 	if d <= 0 {
@@ -106,9 +106,6 @@ func sendTime(c interface{}, seq uintptr) {
 // After waits for the duration to elapse and then sends the current time
 // on the returned channel.
 // It is equivalent to NewTimer(d).C.
-// The underlying Timer is not recovered by the garbage collector
-// until the timer fires. If efficiency is a concern, use NewTimer
-// instead and call Timer.Stop if the timer is no longer needed.
 func After(d Duration) <-chan Time {
 	return NewTimer(d).C
 }

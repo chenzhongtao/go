@@ -5,7 +5,6 @@
 package net
 
 import (
-	"internal/testenv"
 	"os"
 	"runtime"
 	"strings"
@@ -111,7 +110,7 @@ func testableListenArgs(network, address, client string) bool {
 	}
 
 	// Test wildcard IP addresses.
-	if wildcard && !testenv.HasExternalNetwork() {
+	if wildcard && (testing.Short() || !*testExternal) {
 		return false
 	}
 

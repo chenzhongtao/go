@@ -124,17 +124,16 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 			print("go package net: hostLookupOrder(", hostname, ") = ", ret.String(), "\n")
 		}()
 	}
-	fallbackOrder := hostLookupCgo
 	if c.netGo {
-		fallbackOrder = hostLookupFilesDNS
+		return hostLookupFilesDNS
 	}
 	if c.forceCgoLookupHost || c.resolv.unknownOpt || c.goos == "android" {
-		return fallbackOrder
+		return hostLookupCgo
 	}
 	if byteIndex(hostname, '\\') != -1 || byteIndex(hostname, '%') != -1 {
 		// Don't deal with special form hostnames with backslashes
 		// or '%'.
-		return fallbackOrder
+		return hostLookupCgo
 	}
 
 	// OpenBSD is unique and doesn't use nsswitch.conf.
@@ -155,7 +154,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 			return hostLookupDNSFiles
 		}
 		if len(lookup) < 1 || len(lookup) > 2 {
-			return fallbackOrder
+			return hostLookupCgo
 		}
 		switch lookup[0] {
 		case "bind":
@@ -163,7 +162,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 				if lookup[1] == "file" {
 					return hostLookupDNSFiles
 				}
-				return fallbackOrder
+				return hostLookupCgo
 			}
 			return hostLookupDNS
 		case "file":
@@ -171,11 +170,11 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 				if lookup[1] == "bind" {
 					return hostLookupFilesDNS
 				}
-				return fallbackOrder
+				return hostLookupCgo
 			}
 			return hostLookupFiles
 		default:
-			return fallbackOrder
+			return hostLookupCgo
 		}
 	}
 
@@ -186,11 +185,11 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 		hostname = hostname[:len(hostname)-1]
 	}
 	if stringsHasSuffixFold(hostname, ".local") {
-		// Per RFC 6762, the ".local" TLD is special. And
+		// Per RFC 6762, the ".local" TLD is special.  And
 		// because Go's native resolver doesn't do mDNS or
 		// similar local resolution mechanisms, assume that
 		// libc might (via Avahi, etc) and use cgo.
-		return fallbackOrder
+		return hostLookupCgo
 	}
 
 	nss := c.nss
@@ -200,7 +199,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 	if os.IsNotExist(nss.err) || (nss.err == nil && len(srcs) == 0) {
 		if c.goos == "solaris" {
 			// illumos defaults to "nis [NOTFOUND=return] files"
-			return fallbackOrder
+			return hostLookupCgo
 		}
 		if c.goos == "linux" {
 			// glibc says the default is "dns [!UNAVAIL=return] files"
@@ -213,21 +212,21 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 		// We failed to parse or open nsswitch.conf, so
 		// conservatively assume we should use cgo if it's
 		// available.
-		return fallbackOrder
+		return hostLookupCgo
 	}
 
 	var mdnsSource, filesSource, dnsSource bool
 	var first string
 	for _, src := range srcs {
 		if src.source == "myhostname" {
-			if hostname == "" || hasDot {
+			if hasDot {
 				continue
 			}
-			return fallbackOrder
+			return hostLookupCgo
 		}
 		if src.source == "files" || src.source == "dns" {
 			if !src.standardCriteria() {
-				return fallbackOrder // non-standard; let libc deal with it.
+				return hostLookupCgo // non-standard; let libc deal with it.
 			}
 			if src.source == "files" {
 				filesSource = true
@@ -247,14 +246,14 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 			continue
 		}
 		// Some source we don't know how to deal with.
-		return fallbackOrder
+		return hostLookupCgo
 	}
 
 	// We don't parse mdns.allow files. They're rare. If one
 	// exists, it might list other TLDs (besides .local) or even
 	// '*', so just let libc deal with it.
 	if mdnsSource && c.hasMDNSAllow {
-		return fallbackOrder
+		return hostLookupCgo
 	}
 
 	// Cases where Go can handle it without cgo and C thread
@@ -273,7 +272,7 @@ func (c *conf) hostLookupOrder(hostname string) (ret hostLookupOrder) {
 	}
 
 	// Something weird. Let libc deal with it.
-	return fallbackOrder
+	return hostLookupCgo
 }
 
 // goDebugNetDNS parses the value of the GODEBUG "netdns" value.

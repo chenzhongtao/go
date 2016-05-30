@@ -32,6 +32,7 @@ func TestConfHostLookupOrder(t *testing.T) {
 	tests := []struct {
 		name      string
 		c         *conf
+		goos      string
 		hostTests []nssHostTest
 	}{
 		{
@@ -44,28 +45,6 @@ func TestConfHostLookupOrder(t *testing.T) {
 			hostTests: []nssHostTest{
 				{"foo.local", hostLookupCgo},
 				{"google.com", hostLookupCgo},
-			},
-		},
-		{
-			name: "netgo_dns_before_files",
-			c: &conf{
-				netGo:  true,
-				nss:    nssStr("hosts: dns files"),
-				resolv: defaultResolvConf,
-			},
-			hostTests: []nssHostTest{
-				{"x.com", hostLookupDNSFiles},
-			},
-		},
-		{
-			name: "netgo_fallback_on_cgo",
-			c: &conf{
-				netGo:  true,
-				nss:    nssStr("hosts: dns files something_custom"),
-				resolv: defaultResolvConf,
-			},
-			hostTests: []nssHostTest{
-				{"x.com", hostLookupFilesDNS},
 			},
 		},
 		{
@@ -257,7 +236,6 @@ func TestConfHostLookupOrder(t *testing.T) {
 			hostTests: []nssHostTest{
 				{"x.com", hostLookupFilesDNS},
 				{"somehostname", hostLookupCgo},
-				{"", hostLookupFilesDNS}, // Issue 13623
 			},
 		},
 		{

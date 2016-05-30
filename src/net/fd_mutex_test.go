@@ -14,44 +14,44 @@ import (
 func TestMutexLock(t *testing.T) {
 	var mu fdMutex
 
-	if !mu.incref() {
+	if !mu.Incref() {
 		t.Fatal("broken")
 	}
-	if mu.decref() {
-		t.Fatal("broken")
-	}
-
-	if !mu.rwlock(true) {
-		t.Fatal("broken")
-	}
-	if mu.rwunlock(true) {
+	if mu.Decref() {
 		t.Fatal("broken")
 	}
 
-	if !mu.rwlock(false) {
+	if !mu.RWLock(true) {
 		t.Fatal("broken")
 	}
-	if mu.rwunlock(false) {
+	if mu.RWUnlock(true) {
+		t.Fatal("broken")
+	}
+
+	if !mu.RWLock(false) {
+		t.Fatal("broken")
+	}
+	if mu.RWUnlock(false) {
 		t.Fatal("broken")
 	}
 }
 
 func TestMutexClose(t *testing.T) {
 	var mu fdMutex
-	if !mu.increfAndClose() {
+	if !mu.IncrefAndClose() {
 		t.Fatal("broken")
 	}
 
-	if mu.incref() {
+	if mu.Incref() {
 		t.Fatal("broken")
 	}
-	if mu.rwlock(true) {
+	if mu.RWLock(true) {
 		t.Fatal("broken")
 	}
-	if mu.rwlock(false) {
+	if mu.RWLock(false) {
 		t.Fatal("broken")
 	}
-	if mu.increfAndClose() {
+	if mu.IncrefAndClose() {
 		t.Fatal("broken")
 	}
 }
@@ -59,10 +59,10 @@ func TestMutexClose(t *testing.T) {
 func TestMutexCloseUnblock(t *testing.T) {
 	c := make(chan bool)
 	var mu fdMutex
-	mu.rwlock(true)
+	mu.RWLock(true)
 	for i := 0; i < 4; i++ {
 		go func() {
-			if mu.rwlock(true) {
+			if mu.RWLock(true) {
 				t.Error("broken")
 				return
 			}
@@ -76,7 +76,7 @@ func TestMutexCloseUnblock(t *testing.T) {
 		t.Fatal("broken")
 	default:
 	}
-	mu.increfAndClose() // Must unblock the readers.
+	mu.IncrefAndClose() // Must unblock the readers.
 	for i := 0; i < 4; i++ {
 		select {
 		case <-c:
@@ -84,10 +84,10 @@ func TestMutexCloseUnblock(t *testing.T) {
 			t.Fatal("broken")
 		}
 	}
-	if mu.decref() {
+	if mu.Decref() {
 		t.Fatal("broken")
 	}
-	if !mu.rwunlock(true) {
+	if !mu.RWUnlock(true) {
 		t.Fatal("broken")
 	}
 }
@@ -103,21 +103,21 @@ func TestMutexPanic(t *testing.T) {
 	}
 
 	var mu fdMutex
-	ensurePanics(func() { mu.decref() })
-	ensurePanics(func() { mu.rwunlock(true) })
-	ensurePanics(func() { mu.rwunlock(false) })
+	ensurePanics(func() { mu.Decref() })
+	ensurePanics(func() { mu.RWUnlock(true) })
+	ensurePanics(func() { mu.RWUnlock(false) })
 
-	ensurePanics(func() { mu.incref(); mu.decref(); mu.decref() })
-	ensurePanics(func() { mu.rwlock(true); mu.rwunlock(true); mu.rwunlock(true) })
-	ensurePanics(func() { mu.rwlock(false); mu.rwunlock(false); mu.rwunlock(false) })
+	ensurePanics(func() { mu.Incref(); mu.Decref(); mu.Decref() })
+	ensurePanics(func() { mu.RWLock(true); mu.RWUnlock(true); mu.RWUnlock(true) })
+	ensurePanics(func() { mu.RWLock(false); mu.RWUnlock(false); mu.RWUnlock(false) })
 
 	// ensure that it's still not broken
-	mu.incref()
-	mu.decref()
-	mu.rwlock(true)
-	mu.rwunlock(true)
-	mu.rwlock(false)
-	mu.rwunlock(false)
+	mu.Incref()
+	mu.Decref()
+	mu.RWLock(true)
+	mu.RWUnlock(true)
+	mu.RWLock(false)
+	mu.RWUnlock(false)
 }
 
 func TestMutexStress(t *testing.T) {
@@ -138,16 +138,16 @@ func TestMutexStress(t *testing.T) {
 			for i := 0; i < N; i++ {
 				switch r.Intn(3) {
 				case 0:
-					if !mu.incref() {
+					if !mu.Incref() {
 						t.Error("broken")
 						return
 					}
-					if mu.decref() {
+					if mu.Decref() {
 						t.Error("broken")
 						return
 					}
 				case 1:
-					if !mu.rwlock(true) {
+					if !mu.RWLock(true) {
 						t.Error("broken")
 						return
 					}
@@ -158,12 +158,12 @@ func TestMutexStress(t *testing.T) {
 					}
 					readState[0]++
 					readState[1]++
-					if mu.rwunlock(true) {
+					if mu.RWUnlock(true) {
 						t.Error("broken")
 						return
 					}
 				case 2:
-					if !mu.rwlock(false) {
+					if !mu.RWLock(false) {
 						t.Error("broken")
 						return
 					}
@@ -174,7 +174,7 @@ func TestMutexStress(t *testing.T) {
 					}
 					writeState[0]++
 					writeState[1]++
-					if mu.rwunlock(false) {
+					if mu.RWUnlock(false) {
 						t.Error("broken")
 						return
 					}
@@ -186,10 +186,10 @@ func TestMutexStress(t *testing.T) {
 	for p := 0; p < P; p++ {
 		<-done
 	}
-	if !mu.increfAndClose() {
+	if !mu.IncrefAndClose() {
 		t.Fatal("broken")
 	}
-	if !mu.decref() {
+	if !mu.Decref() {
 		t.Fatal("broken")
 	}
 }

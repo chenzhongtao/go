@@ -56,13 +56,4 @@ func RangeLoopTests() {
 			_ = f // ERROR "range variable f captured by func literal"
 		}()
 	}
-	type T struct {
-		v int
-	}
-	for _, v := range s {
-		go func() {
-			_ = T{v: 1}
-			_ = []int{v: 1} // ERROR "range variable v captured by func literal"
-		}()
-	}
 }

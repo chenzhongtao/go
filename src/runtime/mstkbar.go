@@ -214,14 +214,13 @@ func gcInstallStackBarrier(gp *g, frame *stkframe) bool {
 }
 
 // gcRemoveStackBarriers removes all stack barriers installed in gp's stack.
-//
-// gp's stack barriers must be locked.
-//
 //go:nowritebarrier
 func gcRemoveStackBarriers(gp *g) {
 	if debugStackBarrier && gp.stkbarPos != 0 {
 		print("hit ", gp.stkbarPos, " stack barriers, goid=", gp.goid, "\n")
 	}
+
+	gcLockStackBarriers(gp)
 
 	// Remove stack barriers that we didn't hit.
 	for _, stkbar := range gp.stkbar[gp.stkbarPos:] {
@@ -232,6 +231,8 @@ func gcRemoveStackBarriers(gp *g) {
 	// adjust them.
 	gp.stkbarPos = 0
 	gp.stkbar = gp.stkbar[:0]
+
+	gcUnlockStackBarriers(gp)
 }
 
 // gcRemoveStackBarrier removes a single stack barrier. It is the
@@ -255,31 +256,6 @@ func gcRemoveStackBarrier(gp *g, stkbar stkbar) {
 		throw("stack barrier lost")
 	}
 	*lrPtr = sys.Uintreg(stkbar.savedLRVal)
-}
-
-// gcTryRemoveAllStackBarriers tries to remove stack barriers from all
-// Gs in gps. It is best-effort and efficient. If it can't remove
-// barriers from a G immediately, it will simply skip it.
-func gcTryRemoveAllStackBarriers(gps []*g) {
-	for _, gp := range gps {
-	retry:
-		for {
-			switch s := readgstatus(gp); s {
-			default:
-				break retry
-
-			case _Grunnable, _Gsyscall, _Gwaiting:
-				if !castogscanstatus(gp, s, s|_Gscan) {
-					continue
-				}
-				gcLockStackBarriers(gp)
-				gcRemoveStackBarriers(gp)
-				gcUnlockStackBarriers(gp)
-				restartg(gp)
-				break retry
-			}
-		}
-	}
 }
 
 // gcPrintStkbars prints the stack barriers of gp for debugging. It

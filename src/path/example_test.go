@@ -54,14 +54,7 @@ func ExampleIsAbs() {
 
 func ExampleJoin() {
 	fmt.Println(path.Join("a", "b", "c"))
-	fmt.Println(path.Join("a", "b/c"))
-	fmt.Println(path.Join("a/b", "c"))
-	fmt.Println(path.Join("a/b", "/c"))
-	// Output:
-	// a/b/c
-	// a/b/c
-	// a/b/c
-	// a/b/c
+	// Output: a/b/c
 }
 
 func ExampleSplit() {

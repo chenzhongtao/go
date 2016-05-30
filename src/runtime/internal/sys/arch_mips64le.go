@@ -5,7 +5,7 @@
 package sys
 
 const (
-	ArchFamily    = MIPS64
+	TheChar       = '0'
 	BigEndian     = 0
 	CacheLineSize = 32
 	PhysPageSize  = 16384
